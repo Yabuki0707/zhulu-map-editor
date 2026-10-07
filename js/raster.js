@@ -1,0 +1,184 @@
+/* ==========================================================================
+   raster.js —— 栅格图层：解码 PNG、图层画布与 ImageData、边界掩膜与金字塔
+   只提供"像素容器"原语，不认识地块语义（配色与归属逻辑在 state.js）。
+   编码：24 位 RGB，码 = R + G×256（0 = 无）—— canvas 会把 16 位灰度降成 8 位，故不用灰度。
+   参考层不在这里：它是**矢量顶点**（js/refvec.js），不再烧成栅格掩膜，也不再有金字塔。
+   ========================================================================== */
+
+import { DATA, W, H, NC } from "./config.js";
+
+/* ---------------- 图层画布（各一张，尺寸 = 栅格） ---------------- */
+export function makeCanvas(w, h) {
+  const c = document.createElement("canvas");
+  c.width = w === undefined ? W : w; c.height = h === undefined ? H : h;
+  return c;
+}
+const readCtx = c => c.getContext("2d", { willReadFrequently: true });
+
+export const plotCanvas = makeCanvas();      // 地块着色层
+export const terCanvas  = makeCanvas();      // 地形着色层
+export const distCanvas = makeCanvas();      // 块区着色层
+export const edgeCanvas = makeCanvas();      // 地块边界掩膜
+export const bedgeCanvas = makeCanvas();     // 块区边界掩膜
+export const overlayCanvas = makeCanvas();   // 选中/悬停高亮层
+export const idCanvas   = makeCanvas();      // 地块原始编码（导出用）
+export const distIdCanvas = makeCanvas();    // 块区原始编码（导出用）
+export const terRawCanvas = makeCanvas();    // 地形原始编码（导出用）
+
+export const plotCtx = readCtx(plotCanvas);
+export const terCtx  = readCtx(terCanvas);
+export const distCtx = readCtx(distCanvas);
+export const edgeCtx = readCtx(edgeCanvas);
+export const bedgeCtx = readCtx(bedgeCanvas);
+export const overlayCtx = readCtx(overlayCanvas);
+export const idCtx = readCtx(idCanvas);
+export const distIdCtx = readCtx(distIdCanvas);
+export const terRawCtx = readCtx(terRawCanvas);
+
+export const plotImg = plotCtx.createImageData(W, H);
+export const terImg  = terCtx.createImageData(W, H);
+export const distImg = distCtx.createImageData(W, H);
+export const edgeImg = edgeCtx.createImageData(W, H);
+export const bedgeImg = bedgeCtx.createImageData(W, H);
+export const overlayImg = overlayCtx.createImageData(W, H);
+export const idImg   = idCtx.createImageData(W, H);
+export const distIdImg = distIdCtx.createImageData(W, H);
+export const terRawImg = terRawCtx.createImageData(W, H);
+
+/* ---------------- 栅格数据（TypedArray）与基准（存档增量以此为参照） ---------------- */
+export const plotData = new Uint16Array(NC);
+export const terrData = new Uint8Array(NC);
+export const distData = new Uint16Array(NC);
+
+export const BASE = { plot: null, terr: null, dist: null };
+export function freezeBase() {
+  BASE.plot = plotData.slice(); BASE.terr = terrData.slice(); BASE.dist = distData.slice();
+}
+
+/* ---------------- 解码：把 PNG 读成数字，而不是当图看 ---------------- */
+function loadImg(src) {
+  return new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error("图层载入失败：" + String(src).slice(0, 48)));
+    i.src = src;
+  });
+}
+export async function decodeAll() {
+  const off = makeCanvas();
+  const c = off.getContext("2d", { willReadFrequently: true });
+  c.imageSmoothingEnabled = false;
+  const [pi, ti, di] = await Promise.all([
+    loadImg(DATA.plot_png), loadImg(DATA.terrain_png),
+    DATA.dist_png ? loadImg(DATA.dist_png) : Promise.resolve(null),
+  ]);
+  c.drawImage(pi, 0, 0, W, H);
+  const d1 = c.getImageData(0, 0, W, H).data;
+  c.clearRect(0, 0, W, H); c.drawImage(ti, 0, 0, W, H);
+  const d2 = c.getImageData(0, 0, W, H).data;
+  c.clearRect(0, 0, W, H);
+  if (di) c.drawImage(di, 0, 0, W, H);
+  const d3 = di ? c.getImageData(0, 0, W, H).data : null;
+  for (let i = 0, j = 0; i < NC; i++, j += 4) {
+    plotData[i] = d1[j] | (d1[j + 1] << 8);
+    terrData[i] = d2[j];
+    if (d3) distData[i] = d3[j] | (d3[j + 1] << 8);
+  }
+  for (const ctx of [idCtx, distIdCtx, terRawCtx]) ctx.imageSmoothingEnabled = false;
+  freezeBase();
+}
+
+/* ---------------- 回写画布 ---------------- */
+export function putBox(ctx, img, b) {
+  if (b) ctx.putImageData(img, 0, 0, b[0], b[1], b[2] - b[0], b[3] - b[1]);
+  else ctx.putImageData(img, 0, 0);
+}
+export function flushAll(b) {
+  putBox(plotCtx, plotImg, b); putBox(terCtx, terImg, b); putBox(distCtx, distImg, b);
+  putBox(idCtx, idImg, b); putBox(distIdCtx, distIdImg, b); putBox(terRawCtx, terRawImg, b);
+}
+
+/* --------------------------------------------------------------------------
+   掩膜金字塔（mipmap）：把 1px 宽的边界掩膜逐级 2×2「或」降采样。
+   用处：缩小时若直接缩放第 0 级，1px 线会整片消失或闪烁；取一级"缩到
+   每格 1~2 屏像素"的层来画，边界在任何缩放级别都稳定可见。
+   （参考层不再走这里——它是矢量，画线由屏幕像素决定。）
+   -------------------------------------------------------------------------- */
+export function buildMips(src, w, h, maxLevel, orLevels = 1) {
+  /* 第 1..orLevels 层用「任一子格置位」——1px 细线不会丢；
+     更粗的层改成「至少两个子格置位」——否则边界会糊成一整片。 */
+  const levels = [{ w, h, data: src }];
+  let cw = w, ch = h, cur = src;
+  for (let l = 1; l <= maxLevel; l++) {
+    const nw = Math.max(1, cw >> 1), nh = Math.max(1, ch >> 1), nd = new Uint8Array(nw * nh);
+    const need = l <= orLevels ? 1 : 2;
+    for (let y = 0; y < nh; y++) {
+      const r0 = (2 * y) * cw, r1 = Math.min(2 * y + 1, ch - 1) * cw;
+      for (let x = 0; x < nw; x++) {
+        const x0 = 2 * x, x1 = Math.min(2 * x + 1, cw - 1);
+        const c = (cur[r0 + x0] ? 1 : 0) + (cur[r0 + x1] ? 1 : 0)
+                + (cur[r1 + x0] ? 1 : 0) + (cur[r1 + x1] ? 1 : 0);
+        nd[y * nw + x] = c >= need ? 255 : 0;
+      }
+    }
+    levels.push({ w: nw, h: nh, data: nd });
+    cw = nw; ch = nh; cur = nd;
+  }
+  return levels;
+}
+
+/* 掩膜 → 上色画布（按级缓存；掩膜变了用 invalidate 丢掉缓存） */
+const mipCanvases = new WeakMap();
+export function maskToCanvas(level, rgb, alpha) {
+  let arr = mipCanvases.get(level);
+  if (!arr) { arr = []; mipCanvases.set(level, arr); }
+  const key = rgb[0] + "," + rgb[1] + "," + rgb[2] + "," + alpha;
+  let hit = arr.find(x => x.key === key);
+  if (hit) return hit.canvas;
+  const cv = makeCanvas(level.w, level.h);
+  const ctx = cv.getContext("2d");
+  const im = ctx.createImageData(level.w, level.h), d = im.data, s = level.data;
+  for (let i = 0, j = 0; i < s.length; i++, j += 4) {
+    d[j] = rgb[0]; d[j + 1] = rgb[1]; d[j + 2] = rgb[2]; d[j + 3] = s[i] ? alpha : 0;
+  }
+  ctx.putImageData(im, 0, 0);
+  arr.push({ key, canvas: cv });
+  return cv;
+}
+
+/* ---------------- 地块 / 块区 边界掩膜（id 变化处描 1px） ---------------- */
+/* 第 0 级掩膜直接用这几张已经上色的画布画，省掉一次 5.2M 像素的 JS 上色循环
+   （否则第一次缩放到 0.5~3 倍会卡一下）。金字塔更高层才现做现缓存。 */
+export const EDGE_COLORS = { plot: [58, 48, 36, 190], dist: [40, 74, 92, 200] };
+function buildEdgeData(src, dst, rgba) {
+  dst.fill(0);
+  for (let y = 0; y < H; y++) {
+    const row = y * W;
+    for (let x = 0; x < W; x++) {
+      const i = row + x, id = src[i];
+      const r = (x + 1 < W) ? src[i + 1] : id, b = (y + 1 < H) ? src[i + W] : id;
+      if (id === r && id === b) continue;
+      if (!id && !r && !b) continue;                   // 海里的噪声不画
+      const j = i * 4;
+      dst[j] = rgba[0]; dst[j + 1] = rgba[1]; dst[j + 2] = rgba[2]; dst[j + 3] = rgba[3];
+    }
+  }
+}
+export function buildEdges(plotSrc, distSrc) {
+  buildEdgeData(plotSrc, edgeImg.data, EDGE_COLORS.plot);
+  edgeCtx.putImageData(edgeImg, 0, 0);
+  if (distSrc) {
+    buildEdgeData(distSrc, bedgeImg.data, EDGE_COLORS.dist);
+    bedgeCtx.putImageData(bedgeImg, 0, 0);
+  }
+}
+export let EDGE_MIPS = null, BEDGE_MIPS = null;
+export function buildEdgeMips(plotSrc, distSrc, maxLevel = 4) {
+  EDGE_MIPS = buildMips(edgeImg.data.slice(), W, H, maxLevel, 3);
+  BEDGE_MIPS = distSrc ? buildMips(bedgeImg.data.slice(), W, H, maxLevel, 3) : null;
+}
+export const edgeMips = () => EDGE_MIPS;
+export const bedgeMips = () => BEDGE_MIPS;
+/* 掩膜的来源：0 级用已上色的画布，更高层用金字塔 */
+export const levelZeroCanvas = kind =>
+  kind === "plot" ? edgeCanvas : bedgeCanvas;

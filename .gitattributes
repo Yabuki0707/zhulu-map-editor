@@ -1,0 +1,4 @@
+# 换行一律按磁盘上的字节来，不做转换（与 game 仓库同一个理由）。
+* -text
+*.png binary
+*.bin binary

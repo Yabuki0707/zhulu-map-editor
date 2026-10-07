@@ -1,0 +1,18 @@
+# 《逐鹿》栅格地图编辑器（独立仓库）
+#
+# 与 game 仓库**互不隶属**：这个目录是 game 里的一个子目录，但两边的 git 各管各的
+# （game/.gitignore 把本目录整个排除，不是 submodule）。理由见根 README 与
+# game 的 docs/adr/0002：编辑器要单独交付给宿主页/别的项目复用。
+
+__pycache__/
+*.py[cod]
+*.part
+*.log
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 注意：js/data.js 是**生成的**（生成器在 game 仓库的 tools/editor_data.py，
+# 本仓库看不到它），但这里**照样收**——它是编辑器与栅格之间的数据契约
+# （网格尺寸 / 地块名 / 底图指纹 base_tag / 图层路径），不收的话这个仓库
+# 读不出自己绑的是哪一版底图。改动它请改生成器，别手改。
