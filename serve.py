@@ -48,6 +48,23 @@ def _draft(name: str) -> str | None:
     return p if os.path.isfile(p) else None
 
 
+def _has_git(path: str) -> bool:
+    """路径里有没有 `.git` 这一段。
+
+    SimpleHTTPRequestHandler 只挡 `../`，**会照样把 `.git/` 吐出去**——编辑器目录
+    加了 git 之后，`GET /.git/config` 就是 200（实测过），而 `.git/config` 里可能有
+    remote 与凭据，`.git/objects` 更是整个历史。服务虽然只绑 127.0.0.1，
+    但本机任何进程、任何网页都能打它。
+
+    比较前先把每段结尾的「空格与点」去掉——Windows 的文件 API 会把 `.git.` / `.git `
+    归一成 `.git`，不处理就是一条绕过。
+    """
+    for seg in path.replace("\\", "/").split("/"):
+        if seg.rstrip(" .").lower() == ".git":
+            return True
+    return False
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
@@ -64,6 +81,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # **先 unquote 再比前缀**：中文文件名在请求里是百分号编码的，
         # 拿编码后的串去跟前缀比永远不相等（本轮踩过的坑）。
         p = urllib.parse.unquote(urllib.parse.urlparse(path).path)
+        if _has_git(p):
+            # 静态服务会老实把 .git/ 发出去（见 _has_git 的说明）——一律当作不存在
+            return os.path.join(STAGING_DIR, "__不存在__")
         if p.startswith(DRAFT_PREFIX):
             name = p[len(DRAFT_PREFIX):]
             if "/" in name or "\\" in name or name in ("", ".", ".."):
