@@ -5,7 +5,7 @@
    参考层不在这里：它是**矢量顶点**（js/refvec.js），不再烧成栅格掩膜，也不再有金字塔。
    ========================================================================== */
 
-import { DATA, W, H, NC } from "./config.js";
+import { DATA, W, H, NC, TER_NAMES, terColor, toRgb, TER_THIN } from "./config.js";
 
 /* ---------------- 图层画布（各一张，尺寸 = 栅格） ---------------- */
 export function makeCanvas(w, h) {
@@ -125,6 +125,74 @@ export function buildMips(src, w, h, maxLevel, orLevels = 1) {
     cw = nw; ch = nh; cur = nd;
   }
   return levels;
+}
+
+/* --------------------------------------------------------------------------
+   地形层金字塔（mipmap）。与上面的掩膜金字塔同法，但降采样规则不一样：
+   掩膜是布尔，这里是 16 个地形类，得决定每个 2×2 块取哪一类。
+
+   · **细线类（河 / 湖 / 冰川）优先保住**：块里命中就取它（前两级「≥1 格」，
+     更深一级「≥2 格」，与掩膜的 `need` 同思路——否则会一路膨胀成一片）。
+   · 其余按**多数决**。
+
+   为什么必须做：地形底图原本是满分辨率一次 blit，而 canvas 是
+   `imageSmoothingEnabled=false`（最近邻点采样）。缩小时 1 格宽的河会被整片丢掉，
+   屏幕上就是「长江断流」。数据侧已把河烧成 4 邻接连通（tools/build_raster.py 的
+   burn_lines），但点采样照样会丢——两边都得治。
+
+   地形**永远不变**（管线定稿、编辑器只读，docs/adr/0001），所以建一次就够，
+   不需要失效逻辑。
+   -------------------------------------------------------------------------- */
+export let TER_MIPS = null;
+export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
+  const levels = [null];                       // 0 级直接用现成的 terCanvas，不在这里建
+  let cw = W, ch = H, cur = terrData;
+  for (let l = 1; l <= maxLevel; l++) {
+    const nw = Math.max(1, cw >> 1), nh = Math.max(1, ch >> 1), nd = new Uint8Array(nw * nh);
+    const need = l <= thinLevels ? 1 : 2;
+    const cnt = new Uint8Array(TER_NAMES.length);
+    for (let y = 0; y < nh; y++) {
+      const r0 = 2 * y * cw, r1 = Math.min(2 * y + 1, ch - 1) * cw;
+      for (let x = 0; x < nw; x++) {
+        const x0 = 2 * x, x1 = Math.min(2 * x + 1, cw - 1);
+        const a = cur[r0 + x0], b = cur[r0 + x1], c = cur[r1 + x0], d = cur[r1 + x1];
+        let thin = -1, nThin = 0;
+        for (const t of TER_THIN) {                // TER_THIN 已按优先级排好
+          if (a === t || b === t || c === t || d === t) { if (thin < 0) thin = t; nThin++; }
+        }
+        let pick;
+        if (thin >= 0 && nThin >= need) pick = thin;
+        else {
+          cnt[a]++; cnt[b]++; cnt[c]++; cnt[d]++;
+          let best = a, bn = 0;
+          for (let i = 0; i < cnt.length; i++) if (cnt[i] > bn) { bn = cnt[i]; best = i; }
+          cnt[a] = cnt[b] = cnt[c] = cnt[d] = 0;
+          pick = best;
+        }
+        nd[y * nw + x] = pick;
+      }
+    }
+    levels.push({ w: nw, h: nh, data: nd });
+    cw = nw; ch = nh; cur = nd;
+  }
+  TER_MIPS = levels;
+  return levels;
+}
+/* 金字塔某级 → 上色画布（按级缓存；地形不变，所以缓存永不失效） */
+const terMipCanvases = new WeakMap();
+export function terMipCanvas(level) {
+  let cv = terMipCanvases.get(level);
+  if (cv) return cv;
+  cv = makeCanvas(level.w, level.h);
+  const c = cv.getContext("2d");
+  const im = c.createImageData(level.w, level.h), d = im.data, s = level.data;
+  for (let i = 0, j = 0; i < s.length; i++, j += 4) {
+    const rgb = toRgb(terColor(s[i]));
+    d[j] = rgb[0]; d[j + 1] = rgb[1]; d[j + 2] = rgb[2]; d[j + 3] = 255;
+  }
+  c.putImageData(im, 0, 0);
+  terMipCanvases.set(level, cv);
+  return cv;
 }
 
 /* 掩膜 → 上色画布（按级缓存；掩膜变了用 invalidate 丢掉缓存） */

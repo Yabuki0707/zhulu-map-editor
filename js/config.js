@@ -19,7 +19,11 @@ export const LS_HELP = LS_PREFIX + "help.v3";
 /* 笔刷半径（格）：1 = 单格；上限 50（默认格 0.0625° × 50 ≈ 347 km） */
 export const R_MIN = 1, R_MAX = 50, R_DEF = 4;      // R_DEF = 启动默认半径（index.html 的初始 SVG 也标 4）
 export const T_OCEAN = 0;                            // 地形「海洋」编码 —— 海陆口径的唯一判据
-export const T_PLAIN = 9;                            // 地形「平原」编码（橡皮的复原值）
+export const T_PLAIN = 9;                            // 地形「平原」编码（与 tools/terrain.py 的 LEGEND 对齐）
+/* 细线类（河、湖、冰川）：降采样时必须保住，否则缩到全图整条消失。
+   顺序即优先级 —— 河最重要，冰最次。地形层金字塔与笔刷的海陆拦截都要用。 */
+export const T_LAKE = 1, T_RIVER = 2, T_ICE = 3;
+export const TER_THIN = [T_RIVER, T_LAKE, T_ICE];
 
 
 /* --------------------------------------------------------------------------

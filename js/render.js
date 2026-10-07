@@ -4,6 +4,7 @@
 
 import { G, W, H, unitOf, terName, DOM } from "./config.js";
 import { terCanvas, plotCanvas, distCanvas, overlayCanvas, overlayImg, overlayCtx,
+         terMipCanvas, buildTerrainMips,
          plotData, distData, edgeMips, bedgeMips, buildEdges, buildEdgeMips, levelZeroCanvas,
          maskToCanvas } from "./raster.js";
 import { state, getCellsOf, getCellsOfBlock, brushRadius, rebuildPlotColors,
@@ -21,6 +22,11 @@ let cursorText = "—";
 export const setCursorText = t => { cursorText = t; };
 
 const EDGE_RGB = [58, 48, 36], BEDGE_RGB = [40, 74, 92];
+
+/* 地形金字塔：地形不变，所以**懒建一次**就够。放在首次需要时建，是为了不让
+   启动多背 2.4 M 格的降采样（首屏用户多半还在 1:1 看）。 */
+let terMips = null;
+function terrainMips() { return terMips || (terMips = buildTerrainMips(3)); }
 
 export function resize() {
   DPR = Math.min(2, window.devicePixelRatio || 1);
@@ -72,13 +78,26 @@ function blit(cvs, sw, sh, step) {
   ctx.drawImage(cvs, x0, y0, x1 - x0, y1 - y0,
                 v.x + x0 * k * v.s, v.y + y0 * k * v.s, (x1 - x0) * k * v.s, (y1 - y0) * k * v.s);
 }
+/* 地形层：缩小时取金字塔的一级，而不是满分辨率一次 blit。
+   地形底图是 `imageSmoothingEnabled=false`（最近邻点采样），满分辨率直接缩会把
+   1 格宽的河整片丢掉 —— 那是「长江断流」在屏幕上的那一半原因（另一半在数据侧，
+   见 tools/build_raster.py 的 burn_lines）。取"每格 1~2 屏像素"那一级就不丢。 */
+function blitTerrain() {
+  const v = state.view;
+  const mips = terrainMips();
+  if (!mips || v.s >= 0.5) return blit(terCanvas, W, H);
+  const lvl = Math.min(Math.ceil(Math.log2(1 / v.s)), mips.length - 1);
+  const l = mips[lvl];
+  if (!l) return blit(terCanvas, W, H);
+  blit(terMipCanvas(l), l.w, l.h, 1 << lvl);
+}
 export function draw() {
   state.dirty = false;
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.fillStyle = "#cfd6d2"; ctx.fillRect(0, 0, VW, VH);
   const v = state.view, layer = unitOf(state.unit).layer;
   ctx.imageSmoothingEnabled = false;
-  if (state.showTerrain || layer === "terrain") blit(terCanvas, W, H);
+  if (state.showTerrain || layer === "terrain") blitTerrain();
   else { ctx.fillStyle = "#eceae2"; ctx.fillRect(v.x, v.y, W * v.s, H * v.s); }
   if (layer === "plot") blit(plotCanvas, W, H);
   else if (layer === "dist") {
