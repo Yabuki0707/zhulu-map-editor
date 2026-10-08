@@ -11,11 +11,12 @@ import { state, recount, repaintAll, peekLocal, applySnapshot, seedPlots,
          getBlockCells, getCellsOfBlock,
          undo, redo, canUndo, canRedo, saveNow, componentsOf, splitComponent, scanParts } from "./state.js";
 import { resize, fit, schedule, markOverlayDirty, draw, toCell, buildEdgesNow,
-         centerOn, objectLine, unitInfoText, viewSize } from "./render.js";
+         centerOn, objectLine, cellReadout, viewSize } from "./render.js";
 import { bindUI, renderLeft, renderInspector, renderStats, setMode, setUnit,
          setRadius, setPen, pickObject, toast, pickAt, newAtCurrent,
          createPlotAt, createBlockAt, saveToStaging, reportStaging,
-         probeDraft, askDraft } from "./ui.js";
+         probeDraft, askDraft, roStats } from "./ui.js";
+import { RO_LAYERS, RO_ORDER, isRoUnit, setRoView, RO_VIEW } from "./ro.js";
 import { stamp, stampLine, commit } from "./paint.js";
 
 async function init() {
@@ -83,11 +84,13 @@ async function init() {
     state, DATA, G, W, H, NC, fit, schedule, markOverlayDirty, recount, repaintAll,
     toCell, resize, renderLeft, renderInspector, renderStats, setMode, setUnit,
     setRadius, setPen, pickObject, stamp, stampLine, commit, draw, centerOn,
-    buildEdgesNow, seedPlots, toast, objectLine, unitInfoText,
+    buildEdgesNow, seedPlots, toast, objectLine, cellReadout,
     undo, redo, canUndo, canRedo, saveNow, newPlot, newBlock,
     pickAt, newAtCurrent, createPlotAt, createBlockAt, componentsOf, splitComponent, scanParts,
     rebuildPlotColors, plotColorOf, viewSize, loadRef, REF,
     purgeOldKeys, dropMeta, autosave, ID_MAX, saveToStaging, reportStaging, isEditable,
+    /* 只读自然层：层表、顺序、当前层、按层统计（自动化断言用，例如"寒带多少格"） */
+    RO_LAYERS, RO_ORDER, isRoUnit, setRoView, roView: () => RO_VIEW, roStats,
     /* 统计结果的只读视图（手工验/自动化断言用；写操作仍只走上面的函数） */
     getPlotCells, getBlockCells, getCellsOf, getCellsOfBlock,
     /* 便捷断言用 */

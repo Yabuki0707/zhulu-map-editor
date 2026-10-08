@@ -2,9 +2,10 @@
    render.js —— 视图与渲染：缩放平移、图层合成、参考层金字塔、高亮、笔刷范围圈
    ========================================================================== */
 
-import { G, W, H, unitOf, terName, DOM } from "./config.js";
+import { G, W, H, unitOf, DOM } from "./config.js";
+import { isRoUnit, roLayer, cellFields } from "./ro.js";
 import { terCanvas, plotCanvas, distCanvas, overlayCanvas, overlayImg, overlayCtx,
-         terMipCanvas, buildTerrainMips,
+         terMipCanvas, buildTerrainMips, climData,
          plotData, distData, edgeMips, bedgeMips, buildEdges, buildEdgeMips, levelZeroCanvas,
          maskToCanvas } from "./raster.js";
 import { state, getCellsOf, getCellsOfBlock, brushRadius, rebuildPlotColors,
@@ -215,7 +216,7 @@ function drawRefVector() {
 const OUTLINE_MAX = 24000;                 // 像元太多的对象不描轮廓（成本不值当）
 const outlineCache = new Map();
 function outlineFor(unit, id) {
-  if (unit === "terrain" || id === undefined || id === null || id < 0) return null;
+  if (isRoUnit(unit) || id === undefined || id === null || id < 0) return null;   // 只读层没有"对象"
   const key = unit + "|" + id;
   const hit = outlineCache.get(key);
   if (hit !== undefined) return hit;
@@ -358,20 +359,41 @@ let raf = 0;
 export function schedule() { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; draw(); }); }
 
 /* ---------------------------------------------------------------- 页脚与悬停贴 */
-export function unitInfoText(i) {
+/* 一格的自然那一半：覆盖 ｜ 形态 ｜ 热量带·干湿 ｜ 显示类。
+   口径**只有一处** —— js/ro.js 的 cellFields（海洋格后两样是"—"，因为它的气候码无意义）。 */
+export function cellNaturalText(i) {
   if (i < 0) return "";
-  const id = state.plot[i], b = state.dist[i], t = state.terr[i];
-  const p = state.plots[id];
-  const parts = [`地块 ${id || "无"}${p ? " " + p.n : ""}`];
-  parts.push(`块区 ${b || "无"}${state.blocks[b] ? " " + state.blocks[b].n : ""}`);
-  parts.push(`地形 ${terName(t)}`);
-  return parts.join(" ｜ ");
+  const f = cellFields(state.terr[i], climData[i]);
+  return `覆盖 ${f.cover} ｜ 形态 ${f.form} ｜ 热量带 ${f.heat} ｜ 干湿 ${f.moist} ｜ 显示类 ${f.display}`;
+}
+/* 悬停贴的**短**写法：不写"覆盖/形态/热量带/干湿"那些标签——一行五个标签比内容还长，
+   跟着光标跑的一块牌子挡地图。格式是两行：上行是名字，下行是三个轴（用 · 连）。
+   海陆判据只看 `f.ocean`（不能拿 `heat === "—"` 当海——寒带格的热量带也是 "—"）。 */
+export function cellNaturalShort(i) {
+  if (i < 0) return "";
+  const f = cellFields(state.terr[i], climData[i]);
+  if (f.ocean) return f.display;                              // 海洋：气候码无意义，只报名字
+  if (f.polar) return `${f.display}\n${f.cover}·${f.form} · 寒带`;   // 寒带不占热量带那一轴
+  return `${f.display}\n${f.cover}·${f.form} · ${f.heat}·${f.moist}`;
+}
+/* 左下角那条读数：**行政与自然都报全**（2026-10-09 适配 v3 的两轴模型）。
+   原先只报「地块 ｜ 块区 ｜ 地形 森林·山地」——形态与覆盖挤在一个词里，气候整个缺席。
+   页脚**不省标签**（它是"读得全"的那一处）；省标签的是悬停贴（cellNaturalShort）。 */
+export function cellReadout(i) {
+  if (i < 0) return "";
+  const x = i % W, y = (i - x) / W;
+  const pid = state.plot[i], bid = state.dist[i];
+  const pn = pid && state.plots[pid] ? " " + state.plots[pid].n : "";
+  const bn = bid && state.blocks[bid] ? " " + state.blocks[bid].n : "";
+  return `格 ${x},${y} ｜ 地块 ${pid || "无"}${pn} ｜ 块区 ${bid || "无"}${bn} ｜ `
+    + cellNaturalText(i);
 }
 export function objectLine(unit, id) {
   if (unit === "domain") return id >= 0 ? `地域 ${DOMNAME(id)}` : "地域（未选）";
   if (unit === "plot") return id ? `地块 ${id} ${state.plots[id] ? state.plots[id].n : ""}` : "地块（未选）";
   if (unit === "block") return id ? `块区 ${id} ${state.blocks[id] ? state.blocks[id].n : ""}` : "块区（未选）";
-  return `地形 ${terName(id)}`;
+  /* 只读自然层没有"选中某个对象"这回事（docs/adr/0001）：报的是**这一格**在那层上的读数 */
+  return `${roLayer(unit).n}（只读）`;
 }
 const DOMNAME = i => (DOM[i] ? DOM[i].g + " · " + DOM[i].d : "—");
 
@@ -383,21 +405,29 @@ export function updateFooter() {
   const cs = document.getElementById("fCursor");
   if (cs) cs.textContent = cursorText;
   const fc = document.getElementById("fCell");
-  if (fc) fc.textContent = state.curCell >= 0
-    ? `格 ${state.curCell % W},${Math.floor(state.curCell / W)} ｜ ${unitInfoText(state.curCell)}` : "";
+  if (fc) {
+    const t = cellReadout(state.curCell);
+    if (t !== fc.textContent) fc.textContent = t;
+    fc.title = t;                          // 窗口窄时会被省略号裁掉，title 里给全文
+  }
   const chip = document.getElementById("chip");
   if (chip) {
     const i = state.curCell;
     if (i < 0 || state.mode !== "view") { chip.hidden = true; }
     else {
       const u = state.unit;
-      const id = u === "plot" ? state.plot[i] : u === "block" ? state.dist[i]
-               : u === "domain" ? (state.plots[state.plot[i]] || {}).d ?? -1 : state.terr[i];
       chip.hidden = false;
-      chip.textContent = objectLine(u, u === "domain" ? (id === undefined ? -1 : id) : id);
+      /* 悬停贴跟着光标走，所以这里**短写**（两行：名字 / 三个轴），不挂标签。
+         页脚那条才是"读得全"的地方（cellReadout 带全部标签）。
+         行政单元在短写之上再加一行"光标下是哪个地块/块区"。 */
+      const short = cellNaturalShort(i);
+      chip.textContent = isRoUnit(u) ? short : `${objectLine(u, state.sel[u])}\n${short}`;
       const x = state.view.x + ((i % W) + 1) * state.view.s + 10;
       const y = state.view.y + Math.floor(i / W) * state.view.s + 8;
-      chip.style.transform = `translate(${Math.max(4, Math.min(VW - 12, x))}px,${Math.max(4, Math.min(VH - 30, y))}px)`;
+      /* 上下留出**两行**牌子的高度（≈37px）：留 30px 时第二行的下半截会被 main 的
+         overflow:hidden 切掉（贴片是两行之后才发现的老常数）。 */
+      chip.style.transform = `translate(${Math.max(4, Math.min(VW - 12, x))}px,`
+        + `${Math.max(4, Math.min(VH - 48, y))}px)`;
     }
   }
 }

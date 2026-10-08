@@ -5,8 +5,8 @@
    参考层不在这里：它是**矢量顶点**（js/refvec.js），不再烧成栅格掩膜，也不再有金字塔。
    ========================================================================== */
 
-import { DATA, W, H, NC, terColor, toRgb, TER_THIN, RO_VIEW, climateColor,
-         coverColor } from "./config.js";
+import { DATA, W, H, NC, TER_THIN } from "./config.js";
+import { RO_VIEW, roColor } from "./ro.js";
 
 /* ---------------- 图层画布（各一张，尺寸 = 栅格） ---------------- */
 export function makeCanvas(w, h) {
@@ -23,8 +23,10 @@ export const edgeCanvas = makeCanvas();      // 地块边界掩膜
 export const bedgeCanvas = makeCanvas();     // 块区边界掩膜
 export const overlayCanvas = makeCanvas();   // 选中/悬停高亮层
 export const idCanvas   = makeCanvas();      // 地块原始编码（导出用）
-export const distIdCanvas = makeCanvas();    // 块区原始编码（导出用）
-export const terRawCanvas = makeCanvas();    // 地形原始编码（导出用）
+/* 这里原来还有两张"原始编码"画布（块区 distId / 地形 terRaw）：它们唯一的消费者是编辑器的
+   「导出块区/地形 PNG」菜单，而导出块区改走 `distLocalPng()`（要先把全局 id 折成局部序号）、
+   导出地形按 docs/adr/0001 早已删掉。没人读的 5.2M 像元画布 ×2（约 74 MB）留着，
+   还要在**每格写入的热路径**里跟着刷一遍 —— 2026-10-09 随只读层重构一并删掉。 */
 
 export const plotCtx = readCtx(plotCanvas);
 export const terCtx  = readCtx(terCanvas);
@@ -33,8 +35,6 @@ export const edgeCtx = readCtx(edgeCanvas);
 export const bedgeCtx = readCtx(bedgeCanvas);
 export const overlayCtx = readCtx(overlayCanvas);
 export const idCtx = readCtx(idCanvas);
-export const distIdCtx = readCtx(distIdCanvas);
-export const terRawCtx = readCtx(terRawCanvas);
 
 export const plotImg = plotCtx.createImageData(W, H);
 export const terImg  = terCtx.createImageData(W, H);
@@ -43,15 +43,13 @@ export const edgeImg = edgeCtx.createImageData(W, H);
 export const bedgeImg = bedgeCtx.createImageData(W, H);
 export const overlayImg = overlayCtx.createImageData(W, H);
 export const idImg   = idCtx.createImageData(W, H);
-export const distIdImg = distIdCtx.createImageData(W, H);
-export const terRawImg = terRawCtx.createImageData(W, H);
 
 /* ---------------- 栅格数据（TypedArray）与基准（存档增量以此为参照） ---------------- */
 export const plotData = new Uint16Array(NC);
 export const terrData = new Uint8Array(NC);
 export const distData = new Uint16Array(NC);
 /* 气候码层（热量带×8+干湿，0..31）。只用来给地形**派生显示色**——森林的四种绿靠它，
-   地形本身仍然是那 14 类（ADR 0006）。它是只读产品层，编辑器不写它。 */
+   而底图里存的仍是「覆盖 × 形态」两个半字节（ADR 0006、0007）。只读产品层，编辑器不写它。 */
 export const climData = new Uint8Array(NC);
 
 export const BASE = { plot: null, terr: null, dist: null };
@@ -102,7 +100,7 @@ export async function decodeAll() {
     if (d3) distData[i] = d3[j] ? l2g[(plotData[i] << 8) | d3[j]] : 0;
     if (d4) climData[i] = d4[j] & 31;
   }
-  for (const ctx of [idCtx, distIdCtx, terRawCtx]) ctx.imageSmoothingEnabled = false;
+  for (const ctx of [idCtx]) ctx.imageSmoothingEnabled = false;
   freezeBase();
 }
 
@@ -113,7 +111,7 @@ export function putBox(ctx, img, b) {
 }
 export function flushAll(b) {
   putBox(plotCtx, plotImg, b); putBox(terCtx, terImg, b); putBox(distCtx, distImg, b);
-  putBox(idCtx, idImg, b); putBox(distIdCtx, distIdImg, b); putBox(terRawCtx, terRawImg, b);
+  putBox(idCtx, idImg, b);
 }
 
 /* --------------------------------------------------------------------------
@@ -212,16 +210,10 @@ export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
   TER_MIPS = levels;
   return levels;
 }
-/* 金字塔某级 → 上色画布。**按"级 × 只读预览模式"缓存**（地形层不变，缓存不必失效，
-   只有切换 地形/气候 视图时才换一份——见 config.js 的 RO_VIEW）。 */
-const terMipCanvases = new WeakMap();          // level → {terrain?: canvas, climate?: canvas}
-export function roColor(byte, code) {
-  /* 只读自然层的取色：气候视图下海洋仍画海洋色（海洋的气候码无意义）。 */
-  if (RO_VIEW === "climate") {
-    return toRgb((byte >> 4) === 0 ? coverColor(0) : climateColor(code));
-  }
-  return toRgb(terColor(byte, code));
-}
+/* 金字塔某级 → 上色画布。**按"级 × 只读预览层"缓存**（自然层不变，缓存不必失效，
+   只有切换 地形/气候 时才换一份——层与取色口径都在 js/ro.js 的 RO_LAYERS）。
+   ⚠️ 千万别在这里按层名分叉取色：那正是 2026-10-09 抽掉的那坨"按单元硬编码"。 */
+const terMipCanvases = new WeakMap();          // level → { [层名]: canvas }
 export function terMipCanvas(level) {
   let slot = terMipCanvases.get(level);
   if (!slot) { slot = {}; terMipCanvases.set(level, slot); }

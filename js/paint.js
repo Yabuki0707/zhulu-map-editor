@@ -1,16 +1,17 @@
 /* ==========================================================================
-   paint.js —— 笔刷：圆形范围（半径 1..50）、笔/橡皮、四个单元的编辑行为
+   paint.js —— 笔刷：圆形范围（半径 1..50）、笔/橡皮、**三个可编辑单元**的行为
      地域：改"光标下地块"的归属（编辑对象 = 地块）
      地块：把地块编码写进栅格（编辑对象 = 栅格）
      块区：在"所属地块"的范围内把块区编码写进栅格（编辑对象 = 地块内的栅格）
-     地形：把地形编码写进栅格（编辑对象 = 栅格）
+   **只读自然层（地形 / 气候）不在这里**：管线定稿，一格都不许改（docs/adr/0001）。
 
    **海底不可落笔**：地形层的「海洋」就是海陆口径（陆地 = NE 陆地 ∪ 湖泊 ∪ 冰川区），
-   地块层在构建期已按它裁过。若放手让人在海上涂地块，口径当场破掉；所以四个单元
+   地块层在构建期已按它裁过。若放手让人在海上涂地块，口径当场破掉；所以三个单元
    一律跳过 `地形 == 海洋` 的像元，并在一次手势结束时把跳过数报出来（不静默）。
    ========================================================================== */
 
 import { W, H, T_OCEAN } from "./config.js";
+import { isRoUnit } from "./ro.js";
 import { flushAll } from "./raster.js";
 import { state, beginGesture, endGesture, writeAll, autosave,
          setPlotDomain, setBlockOwner, brushRadius, KIND } from "./state.js";
@@ -48,9 +49,11 @@ export function forEachInBrush(i, fn) {
 /* 涂一格：按当前单元与笔/橡皮形态写值 */
 function paintOne(k, pen) {
   const unit = state.unit;
-  /* 地形是只读单元（docs/adr/0001）：地形图是管线算出来的模拟底数，编辑器一格都不许改。
-     拦在**最底层**——就算 UI 上哪里漏了（快捷键、存档恢复的旧 unit），也写不进去。 */
-  if (unit === "terrain") return;
+  /* 只读自然层（地形 / 气候）一格都不许改（docs/adr/0001）。拦在**最底层**——
+     就算 UI 上哪里漏了（快捷键、存档恢复的旧 unit），也写不进去。
+     ⚠️ 必须写 `isRoUnit(unit)` 而不是 `unit === "terrain"`：只判断地形的话，unit = "climate"
+     会一路落到下面的 `else`（地域分支），**在气候视图里落笔会静默改掉地块的归属**。 */
+  if (isRoUnit(unit)) return;
   if (state.terr[k] === T_OCEAN) {                          // 海底：口径来自底图，不动
     if (unit !== "domain") skippedOcean++;                  // 地域单元本来就没有地块可指
     return;

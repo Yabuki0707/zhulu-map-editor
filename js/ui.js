@@ -2,14 +2,18 @@
    ui.js —— 界面：模式/单元、SVG 笔刷控件、左右面板、检视器、导入导出、键鼠
    视图层与编辑层共用同一组对象：左栏列出"当前单元"的对象，点选即选中；
    编辑模式下选中的对象就是笔刷对象。
+
+   **只读自然层（地形 / 气候）的知识不在这里**：它们由 js/ro.js 的 `RO_LAYERS` 描述，
+   本文件只留三条通用路径 —— 顶栏按钮由表生成、左栏面板调 `layer.panel(stats)`、
+   右栏检视器调 `layer.insp(stats)`。所以"加一层自然层"不用碰这个文件（2026-10-09 抽的）。
    ========================================================================== */
 
-import { DATA, G, W, NC, DOM, COLOR, UNASSIGNED, terColor, terName,
-         UNIT, R_MIN, R_MAX, R_DEF, LAY_KEY, LS_HELP, T_PLAIN, T_OCEAN, blockColor, rowLat,
-         COVER_NAMES, FORM_NAMES, coverColor, displayOf, CLIMATE,
-         climateColor, setRoView, RO_VIEW, DISPLAY_RULES,
+import { DATA, G, W, NC, DOM, COLOR, UNASSIGNED,
+         UNIT, R_MIN, R_MAX, R_DEF, LAY_KEY, LS_HELP, T_OCEAN, blockColor, rowLat,
          isEditable } from "./config.js";
-import { BASE, idCanvas, distIdCanvas, terRawCanvas, flushAll, climData } from "./raster.js";
+import { RO_KEYS, RO_ORDER, roLayer, isRoUnit, esc, buildRoStats,
+         setRoView, RO_VIEW, cellFields } from "./ro.js";
+import { BASE, idCanvas, flushAll, climData } from "./raster.js";
 import { loadRef, REF } from "./refvec.js";
 import { state, recount, getCellsOf, getPlotCells, getCellsOfBlock, getBlockCells, repaintAll, repaintPlotLayer, newPlot, newBlock, componentsOf, splitComponent, scanParts, setPlotDomain, setPlotName, setBlockOwner, setBlockName, undo, redo, saveNow, autosave, snapshot, applySnapshot, seedPlots, clearSave, dropMeta, ID_MAX, domCells, cellsWithPlot, cellsWithBlock, blockStrays, touched, beginGesture, writeAll, repaintTerrain } from "./state.js";
 import { cv, resize, fit, FIT, schedule, markOverlayDirty, setSpace, setCursorText,
@@ -31,8 +35,11 @@ export function toast(msg, ms) {
 }
 
 /* ---------------- 模式（视图 / 编辑） ---------------- */
-/* 地形是只读单元（docs/adr/0001）：编辑模式里没有它。把"当前单元"收敛到合法值，
-   免得留下"当前笔刷 = 地形"却无处落笔的悬空态。返回是否真的换过。 */
+/* 自然层是**只读**单元（docs/adr/0001）：编辑模式里没有它们。
+   两个口径都要收紧，缺一个就会留下"当前笔刷 = 地形"却无处落笔的悬空态：
+     ① `coerceUnit` 把**当前单元**推到合法值；
+     ② `syncRoButtons` 把**按钮**连分隔符一起藏起来（不是只藏地形那一个——
+        气候原来漏了，于是编辑模式下还能点进一个只读层）。 */
 function coerceUnit() {
   if (state.mode === "edit" && !isEditable(state.unit)) { state.unit = "plot"; return true; }
   return false;
@@ -41,17 +48,25 @@ function syncUnitButtons() {
   document.querySelectorAll("#unitSeg button").forEach(b =>
     b.setAttribute("aria-pressed", String(b.dataset.unit === state.unit)));
 }
+/* 只读层的按钮（含组间分隔符）只在**视图模式**下出现 */
+function syncRoButtons() {
+  const edit = state.mode === "edit";
+  for (const k of RO_KEYS) {
+    const b = document.querySelector(`#unitSeg button[data-unit="${k}"]`);
+    if (b) b.hidden = edit;
+  }
+  const sep = document.getElementById("roSep");
+  if (sep) sep.hidden = edit;
+}
 export function setMode(m, silent) {
   state.mode = m;
   document.querySelectorAll("#modeSeg button").forEach(b =>
     b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
-  /* 单元条随模式变：编辑模式下把只读的「地形」摘掉 */
-  const roBtn = document.querySelector('#unitSeg button[data-unit="terrain"]');
-  if (roBtn) roBtn.hidden = (m === "edit");
+  syncRoButtons();
   if (coerceUnit()) { repaintPlotLayer(); syncUnitButtons(); }
   cv.style.cursor = m === "view" ? "grab" : (state.pen ? "crosshair" : "cell");
   $("hint").textContent = m === "view"
-    ? "视图：拖拽平移 · 滚轮缩放 · 左右键都可点选对象"
+    ? "视图：拖拽平移 · 滚轮缩放 · 左右键都可点选对象 · 顶栏右侧可切自然层（只读）"
     : UNIT[state.unit].tip + " · " + (state.pen ? "笔" : "橡皮") + " · 右键选中";
   $("brushbox").style.opacity = m === "edit" ? "1" : ".5";
   markOverlayDirty();
@@ -59,18 +74,19 @@ export function setMode(m, silent) {
   state.dirty = true; schedule();
 }
 
-/* ---------------- 单元（地域 / 地块 / 块区 / 地形） ---------------- */
+/* ---------------- 单元（三个可编辑的 + 若干只读自然层） ---------------- */
 export function setUnit(u) {
   if (!UNIT[u]) return;
   if (!isEditable(u) && state.mode === "edit") {
-    if (u === "terrain") toast("地形只读：由管线从高程、起伏与土地覆盖算出，编辑器不能改（视图模式里看显示类统计）", 3200);
-    else if (u === "climate") toast("气候只读：由管线从柯本气候分类算出，编辑器不能改（视图模式里看两轴交叉与占比）", 3600);
+    const L = roLayer(u);
+    toast(`${L.n}只读：${L.tip}（切到视图模式看；编辑模式里没有自然层）`, 3400);
     return;
   }
   state.unit = u;
-  /* 只读自然层：把底图着色切到它（地形 = 覆盖×形态的派生色；气候 = 热量带×干湿）。
-     只重画地形那一层，不动地块/块区，省掉秒级的全量重画。 */
-  const want = u === "climate" ? "climate" : "terrain";
+  /* 底图着色切到当前层。⚠️ **离开只读层时要切回地形**：`want` 不能只在只读层上算——
+     否则看过一次「气候」之后切回地块/块区，底图会一直留着气候配色（地块层是半透明的），
+     而唯一能把它切回来的动作是再点一次「地形」。所以非只读单元一律 want = "terrain"。 */
+  const want = isRoUnit(u) ? u : "terrain";
   if (RO_VIEW !== want) { setRoView(want); repaintTerrain(); }
   searchText = "";
   syncUnitButtons();
@@ -122,12 +138,18 @@ export const plotNameOf = id => (id && state.plots[id] ? state.plots[id].n : `�
    不再有二级菜单：按**当前单元**决定新建什么，落点是"已选中的那一格"（右键选中）。
      单元 = 地块 → 新建地块，选中那一格归它
      单元 = 块区 → 新建块区，需先选中地块，且选中那格必须在该地块内
-     单元 = 地域 / 地形 → 不可新建（地域是设计层固定的 93 个；地形是只读的，见 docs/adr/0001）
+     单元 = 地域 → 不可新建（地域是设计层固定的 93 个）
+     单元 = 任意只读自然层 → 不可新建（管线定稿，见 docs/adr/0001）
    没选落点或落点不合规时，提示"先去选中"。 */
 export function newAtCurrent() {
   const u = state.unit;
   if (u === "domain") return toast("地域不可新建：地域是设计层固定的 93 个，用「地域」单元把地块指派进去", 2800);
-  if (u === "terrain") return toast("地形不可新建：地形由管线定稿，编辑器只读（docs/adr/0001）", 2800);
+  /* ⚠️ 这一条必须**拦住所有只读层**，不能只写 terrain：漏了 climate 的话，在气候视图里
+     点「＋ 新建」会一路落到 `createBlockAt`，凭空建出一个块区（改的是行政层！）。 */
+  if (isRoUnit(u)) {
+    const L = roLayer(u);
+    return toast(`${L.n}不可新建：${L.tip}。它是管线定稿的产品层，编辑器只读（docs/adr/0001）`, 3000);
+  }
   const cell = state.selCell;
   if (cell < 0) return toast(u === "block"
     ? "先用右键在选中的地块内选一格作为落点"
@@ -200,14 +222,14 @@ function addCellTo(k, kind, id) {
      地域 → 选中该格所属的【地块】（地域的编辑对象本来就是地块）
      地块 → 选中该【栅格】，并把该格所属地块设为当前地块
      块区 → 选中该【栅格】，同时带上该格的地块与块区
-     地形 → 不可选中（地形是只读底图，16 类，没有"选中某个地形"这回事）
+     自然层（地形/气候）→ 不可选中（只读底图，没有"选中某个地形"这回事）
    选中的那一格记进 state.selCell，新建对象时以它为落点。
    quiet = 右键按住连续拾取时用：只做轻量更新（高亮 + 清单高亮），
    右栏检视器与统计留到松手那一下再整体重建——否则每换一格就要为全部地块生成一遍下拉选项。
    -------------------------------------------------------------------------- */
 export function pickAt(i, quiet) {
   const u = state.unit;
-  if (u === "terrain") return;                        // 地形编辑无法选中
+  if (isRoUnit(u)) return;                            // 只读自然层没有"选中某个对象"这回事
   if (i < 0) { state.selCell = -1; markOverlayDirty(); schedule(); return; }
   state.selCell = i; state.curCell = i;
   const pid = state.plot[i], bid = state.dist[i];
@@ -246,13 +268,13 @@ export function renderLeft() {
   const act = $("leftAct");
   if (act) act.title = state.unit === "plot" ? "新建地块：落点 = 右键选中的那一格"
     : state.unit === "block" ? "新建块区：落点须在选中地块内（右键选）"
-    : "当前单元不可新建（地域/地形是固定的）";
+    : isRoUnit(state.unit) ? `${roLayer(state.unit).n}只读：管线定稿，不可新建`
+    : "地域不可新建（设计层固定）";
   countRefs = new Map(); rowRefs = new Map(); leftSelKey = null;   // 面板换了 DOM，选中态缓存作废
   if (leftKind === "domain") return renderDomainPanel();
   if (leftKind === "plot") return renderPlotPanel();
   if (leftKind === "block") return renderBlockPanel();
-  if (leftKind === "climate") return renderClimatePanel();
-  return renderTerrainPanel();
+  return renderRoPanel(leftKind);                 // 只读自然层（地形 / 气候 / …）
 }
 export function refreshLeftCounts() {
   const free = cellsWithPlot - domCells.reduce((a, b) => a + b, 0);
@@ -272,8 +294,7 @@ function leftSubText() {
   if (leftKind === "domain") return `${DOM.length} 域 · 已指派 ${(domCells.reduce((a, b) => a + b, 0) / 1e6).toFixed(2)}M 格`;
   if (leftKind === "plot") return `${Object.keys(state.plots).length} 块 · ${(cellsWithPlot / 1e6).toFixed(2)}M 格`;
   if (leftKind === "block") return `${Object.keys(state.blocks).length} 个 · ${(cellsWithBlock / 1e6).toFixed(2)}M 格`;
-  if (leftKind === "climate") return "热量带 × 干湿 · 只读";
-  return "显示类 · 只读";
+  return roLayer(leftKind).sub;                 // 只读自然层自己给副标题
 }
 function syncLeftSel() {
   const cur = state.sel[leftKind];
@@ -365,85 +386,25 @@ function renderBlockPanel() {
       : `<div class="empty">还没有块区。点右上「＋ 新建」，再在地图上涂。</div>`);
   afterPanelRender();
 }
-/* — 地形（只读；docs/adr/0001）— */
-/* 只读自然层的统计：一次遍历算两样——**显示类**计数（地形层）与**气候码**计数（气候层）。
-   显示类才是玩家在图上读到的名字（雨林/针叶林/沙漠/戈壁/苔原/田野/绿洲…），所以地形面板
-   按它统计；"覆盖 × 形态"的明细退到脚注。**不按覆盖数**——那答不了"雨林有多少"。 */
-let roStats = null, roStatsAt = 0;
-function roHistogram() {
+/* — 只读自然层（地形 / 气候 / …；docs/adr/0001）—
+   本文件对只读层**只知道三件事**：调 `layer.panel(stats)` 出左栏、调 `layer.insp(stats)`
+   出右栏、用 `layer.n / .sub` 出抬头。层自己的名字、配色、统计口径、脚注全在 ro.js 那张表。
+   面板与检视器共用**同一份统计**：一次遍历（940 万格）喂所有层，缓存 600 ms——
+   renderLeft 会被悬停/涂改/选中频繁触发，而这些数只与只读层有关、与编辑无关。 */
+let _roStats = null, _roStatsAt = 0;
+export function roStats() {
   const now = Date.now();
-  if (roStats && now - roStatsAt < 600) return roStats;
-  const byName = new Map(), byClimate = new Int32Array(32);
-  const byCover = new Int32Array(COVER_NAMES.length);
-  let land = 0;
-  const t = state.terr, k = climData;
-  for (let i = 0; i < NC; i++) {
-    const b = t[i], c = b >> 4, f = b & 15, code = (k[i] || 0) & 31;
-    // 海洋**两样都不算**：它的气候码恒为 0，混进来会让"寒带"凭空多出 6,400 万格（实测）。
-    if (c === 0) continue;
-    land++; byCover[c]++; byClimate[code]++;
-    const r = displayOf(c, f, code >> 3, code & 7);
-    const n = r ? r.n : `覆盖 ${c} · 形态 ${f}`;
-    byName.set(n, (byName.get(n) || 0) + 1);
-  }
-  roStats = { byName, byClimate, byCover, land };
-  roStatsAt = now;
-  return roStats;
+  if (_roStats && now - _roStatsAt < 600) return _roStats;
+  _roStats = buildRoStats(state.terr, climData);
+  _roStatsAt = now;
+  return _roStats;
 }
 
-function colorOfDisplayName(n) {
-  for (const r of DISPLAY_RULES) if (r.n === n) return r.c;
-  return "#cccccc";
-}
-
-function renderTerrainPanel() {
-  leftTitle.textContent = "地形";
-  leftSub.textContent = "显示类 · 只读（覆盖 × 形态 × 气候）";
-  const { byName, land } = roHistogram();
-  const rows = [...byName.entries()].sort((a, b) => b[1] - a[1]);
-  leftBody.innerHTML = rows.map(([n, v]) =>
-      `<div class="row lv0" style="cursor:default">`
-      + `<span class="sw" style="background:${colorOfDisplayName(n)}"></span>`
-      + `<span class="nm">${esc(n)}</span>`
-      + `<span class="n">${(v / NC * 100).toFixed(2)}%</span></div>`).join("")
-    + `<div class="mut" style="padding:6px 9px;font-size:10.5px">陆地 ${(land / 1e6).toFixed(2)}M 格
-       （百分比以全图为分母）。名字是「覆盖 × 形态 × 气候」当场算出来的**显示类**；
-       底图里只存覆盖（高 4 位）与形态（低 4 位）——见 docs/adr/0006、0007。
-       发现错格只能改管线的分类规则并重跑，编辑器改不了它。</div>`;
-}
-
-function renderClimatePanel() {
-  leftTitle.textContent = "气候";
-  leftSub.textContent = "热量带 × 干湿 · 只读（柯本）";
-  const { byClimate, land } = roHistogram();
-  const H = CLIMATE.heat || [], M = CLIMATE.moist || [];
-  const cell = (h, m) => {
-    const code = h * 8 + m, v = byClimate[code] || 0, pct = v / NC * 100;
-    return `<span title="${esc(H[h] || "")}·${esc(M[m] || "")} ${v.toLocaleString()} 格"`
-      + ` style="background:${climateColor(code)};height:19px;border-radius:3px;text-align:center;`
-      + `line-height:19px;font-size:9.5px;color:#3a3a3a">${pct >= 0.04 ? pct.toFixed(1) + "%" : ""}</span>`;
-  };
-  let html = `<div class="mut" style="padding:6px 9px 2px;font-size:10.5px">陆地 ${(land / 1e6).toFixed(2)}M 格。
-     <b>寒带</b>不占热量带那一轴——它是干湿的「寒带」，单独一行。</div>`;
-  html += `<div style="display:grid;grid-template-columns:46px 1fr;gap:2px;padding:6px 9px 2px">`
-    + `<span class="mut" style="font-size:10px;line-height:19px">寒带</span>`
-    + `<span title="寒带 ${byClimate[0].toLocaleString()} 格" style="background:${climateColor(0)};`
-    + `height:19px;border-radius:3px;text-align:center;line-height:19px;font-size:9.5px;color:#3a3a3a">`
-    + `${byClimate[0] / NC * 100 >= 0.04 ? (byClimate[0] / NC * 100).toFixed(2) + "%" : ""}</span></div>`;
-  html += `<div style="display:grid;grid-template-columns:46px repeat(${M.length - 1},1fr);gap:2px;`
-    + `padding:2px 9px 8px">`;
-  html += `<span></span>` + M.slice(1).map(m =>
-    `<span class="mut" style="font-size:9.5px;text-align:center;writing-mode:vertical-rl;`
-    + `justify-self:center;height:34px">${esc(m)}</span>`).join("");
-  for (let h = 0; h < H.length; h++) {
-    html += `<span class="mut" style="font-size:10px;line-height:19px">${esc(H[h])}</span>`;
-    for (let m = 1; m < M.length; m++) html += cell(h, m);
-  }
-  html += `</div>`;
-  html += `<div class="mut" style="padding:0 9px 8px;font-size:10.5px">码 = 热量带 × 8 + 干湿。
-     热量带 4 档、干湿 7 档（+寒带）；**B 组按纬度补过一刀**（BWh/BSh 在回归线外算亚热带）。
-     见 docs/adr/0006。</div>`;
-  leftBody.innerHTML = html;
+function renderRoPanel(k) {
+  const layer = roLayer(k);
+  leftTitle.textContent = layer.title;
+  leftSub.textContent = layer.sub;
+  leftBody.innerHTML = layer.panel(roStats());
 }
 
 function afterPanelRender() {
@@ -479,18 +440,27 @@ function afterPanelRender() {
   refreshLeftCounts();
   syncLeftSel();
 }
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+/* ⚠️ `esc` 不在这里定义：它由 js/ro.js 导出（只读层的面板与检视器也要转义，
+   两处各写一份迟早分叉）。原先这里有一份 `const esc`，与 import 撞名会**整个模块图报错**。 */
 
 /* ================================================================ 右栏检视 */
 const inspEl = $("insp"), inspTitle = $("inspTitle"), inspSub = $("inspSub");
 export function renderInspector() {
   const u = state.unit;
-  inspTitle.textContent = UNIT[u].n + "（编辑对象：" + UNIT[u].obj + "）";
-  inspSub.textContent = state.mode === "edit" ? "当前笔刷" : "当前选中";
+  /* 只读自然层的抬头不写"编辑对象"——它没有编辑对象（docs/adr/0001） */
+  inspTitle.textContent = isRoUnit(u)
+    ? `${roLayer(u).n}（只读）`
+    : UNIT[u].n + "（编辑对象：" + UNIT[u].obj + "）";
+  inspSub.textContent = isRoUnit(u) ? "统计与口径" : (state.mode === "edit" ? "当前笔刷" : "当前选中");
+  if (isRoUnit(u)) return inspRo(u);
   if (u === "domain") return inspDomain();
   if (u === "plot") return inspPlot();
   if (u === "block") return inspBlock();
-  return inspTerrain();
+  return inspDomain();
+}
+/* 只读自然层的右栏：全部交给层自己的 `insp(stats)`（ro.js），本文件不认识"地形"或"气候" */
+function inspRo(k) {
+  inspEl.innerHTML = roLayer(k).insp(roStats());
 }
 const kmPerCell = y => G.cell * 111.32;
 /* 估面积：按地块/块区的像元抽样，用所在纬度的余弦修正（够用） */
@@ -506,13 +476,16 @@ function areaOfMap(map, id) {
   return n ? sum / n * arr.length : 0;
 }
 const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n.toLocaleString();
-/* 右键选中的那一格（新建对象的落点）——在检视器里报一下，免得不知道选在哪 */
+/* 右键选中的那一格（新建对象的落点）——在检视器里报一下，免得不知道选在哪。
+   自然那一半走 ro.js 的 `cellFields`：覆盖 · 形态 ｜ 热量带 · 干湿 ｜ 显示类。 */
 function selCellRow() {
   const i = state.selCell;
   if (i < 0) return `<dt>选中栅格</dt><dd class="mut" style="font-size:11px">右键点地图选一格</dd>`;
   const x = i % W, y = (i - x) / W, pid = state.plot[i], bid = state.dist[i];
+  const f = cellFields(state.terr[i], climData[i]);
   return `<dt>选中栅格</dt><dd>格 ${x},${y} ｜ 地块 ${pid ? pid + " " + esc(plotNameOf(pid)) : "无"}`
-       + ` ｜ 块区 ${bid || "无"} ｜ 地形 ${esc(terName(state.terr[i]))}</dd>`;
+       + ` ｜ 块区 ${bid || "无"}<br>${esc(f.cover)}·${esc(f.form)} ｜ `
+       + `${esc(f.heat)}·${esc(f.moist)} ｜ <b>${esc(f.display)}</b></dd>`;
 }
 
 function inspPlot() {
@@ -655,34 +628,6 @@ function inspDomain() {
   if (plots.length) $("dGo").onclick = () => { const c = anchorCell("domain", i); if (c >= 0) { centerOn(c, Math.max(state.view.s, FIT() * 8)); schedule(); } };
   inspEl.querySelectorAll(".bar[data-pid]").forEach(el => el.onclick = () => pickObject("plot", +el.dataset.pid, true));
 }
-let terrHist = null, terrHistAt = 0;
-function terrainHistogram() {
-  const now = Date.now();
-  if (terrHist && now - terrHistAt < 400) return terrHist;
-  const h = new Int32Array(COVER_NAMES.length);
-  const t = state.terr;
-  for (let i = 0; i < NC; i++) { const c = t[i] >> 4; if (c < h.length) h[c]++; }
-  terrHist = h; terrHistAt = now;
-  return h;
-}
-function inspTerrain() {
-  const h = terrainHistogram();
-  inspEl.innerHTML = `
-    <dl class="kv">
-      <dt>状态</dt><dd><span class="pill">只读</span> 地形由管线定稿（docs/adr/0001）</dd>
-      <dt>改法</dt><dd class="mut" style="font-size:11px">编辑器改不了地形：它是 ETOPO 高程 ＋
-        Copernicus 土地覆盖算出来的模拟底数，将来要做规则层的「基础地形代价」来源。
-        发现错格只能改管线的分类规则（<code>tools/terrain.py</code> 的常量）并重跑生成。</dd>
-    </dl>
-    <div class="sec-h">各覆盖占比（只读）</div>
-    <div class="bars">` + COVER_NAMES.map((n, i) => {
-      const v = h[i] || 0, pct = (v / NC * 100);
-      return `<div class="bar">`
-        + `<i style="background:${coverColor(i)}"></i><span>${esc(n)}</span>`
-        + `<span class="v">${pct >= 0.01 ? pct.toFixed(2) + "%" : "—"}</span></div>`;
-    }).join("") + `</div>`;
-}
-
 /* ---------------- 清空 / 修正（都走撤销栈） ---------------- */
 function clearCells(kind, id) {
   const map = kind === "plot" ? getCellsOf() : getCellsOfBlock();
@@ -1018,7 +963,10 @@ function bindExports() {
     state.plot.set(BASE.plot); state.terr.set(BASE.terr); state.dist.set(BASE.dist);
     touched.clear(); state.hist = []; state.histAt = -1;
     seedPlots();
-    state.sel = { domain: 0, plot: state.sel.plot, block: 0, terrain: T_PLAIN };
+    /* 选中态回到起点：只读自然层的选中值没有意义，一律归 0（不再写死 terrain 那个键） */
+    const sel = { domain: 0, plot: state.sel.plot, block: 0 };
+    for (const k of RO_KEYS) sel[k] = 0;
+    state.sel = sel;
     recount(); repaintAll(); buildEdgesNow(); renderLeft(); renderInspector(); renderStats();
     markOverlayDirty(); schedule(); setSaved("已清空");
   };
@@ -1036,17 +984,21 @@ function bindHelp() {
     box.innerHTML = `<button class="x" title="关闭">✕</button>
       <b>两种模式</b><span class="sec"><kbd>V</kbd> 视图（拖拽平移 · 滚轮缩放 · 点选看明细）<br>
       <kbd>E</kbd> 编辑（左键涂抹 · <b>右键选中</b> · <kbd>空格</kbd>/中键平移）</span>
-      <span class="sec"><b>右键选中什么</b>由单元决定：<b>地域</b>→选中光标下的<b>地块</b>；<b>地块/块区</b>→选中那一<b>栅格</b>；<b>地形</b>→不可选中（地形只读，没有"选中某个地形"这回事）</span>
-      <span class="sec"><b>四个单元</b>（视图层／编辑层共用）<br>
+      <span class="sec"><b>右键选中什么</b>由单元决定：<b>地域</b>→选中光标下的<b>地块</b>；<b>地块/块区</b>→选中那一<b>栅格</b>；<b>自然层</b>（地形/气候）→不可选中（只读，没有"选中某个地形"这回事）</span>
+      <span class="sec"><b>三个可编辑单元</b>（行政图；视图层／编辑层共用）<br>
       <kbd>1</kbd> 地域 → 编辑对象是<b>地块</b>（拖过一片即改其归属）<br>
       <kbd>2</kbd> 地块 → 编辑对象是<b>栅格</b>（写入地块编码）<br>
-      <kbd>3</kbd> 块区 → 编辑对象是<b>所属地块内的栅格</b><br>
-      <kbd>4</kbd> 地形 → <b>只读</b>：管线从高程＋土地覆盖算出的模拟底数，编辑器一格都不许改<br>　　　　（地形只在<b>视图</b>模式里作为图例与占比出现；编辑模式下单元条上根本没有它）</span>
+      <kbd>3</kbd> 块区 → 编辑对象是<b>所属地块内的栅格</b></span>
+      <span class="sec"><b>两个只读自然层</b>（<b>只在视图模式</b>出现；编辑模式下单元条上根本没有它们）<br>
+      <kbd>4</kbd> 地形 → 一个字节 = <b>覆盖</b>（高 4 位）× 16 + <b>形态</b>（低 4 位）；左栏按<b>显示类</b>统计<br>
+      <kbd>5</kbd> 气候 → 一个字节 = <b>热量带</b> × 8 + <b>干湿</b>；左栏是两轴交叉表<br>
+      两者都由管线定稿、编辑器一格都不许改（<code>docs/adr/0001</code>）；
+      底图着色随当前层切换，页脚读数一次报全：覆盖 ｜ 形态 ｜ 热量带 ｜ 干湿 ｜ <b>显示类</b></span>
       <span class="sec"><b>笔与橡皮</b><kbd>B</kbd> 笔 · <kbd>X</kbd> 橡皮 · 半径 <kbd>[</kbd> <kbd>]</kbd> 或拖顶栏滑杆（1–50 格）<br><b>右键</b> = 选中（拾取）光标下的对象；按住右键拖动可连续拾取</span>
       <span class="sec"><b>图层</b><kbd>T</kbd> 地形底图 · <kbd>R</kbd> 参考层（**矢量顶点**：唐 741 州面 ＋ 现代单元边界；放大到 12 倍显示顶点） · <kbd>P</kbd> 地块线 · <kbd>K</kbd> 块区线</span>
       <span class="sec"><b>海底不可落笔</b>「海洋」就是海陆口径（陆地 = NE 陆地 ∪ 湖泊 ∪ 冰川），地块层在构建期已按它裁过。
       在地形为「海洋」的格子上涂地块/块区/地形一律跳过，并弹提示报跳过格数 —— 这样"地块压在海上"不可能再发生</span>
-      <span class="sec"><b>新建</b>「＋ 新建」按当前单元建：<b>地块</b>→以选中那格为种子；<b>块区</b>→落点须在选中地块内；<b>地域/地形</b>不可新建。没选栅格会提示先右键选一格</span><span class="sec"><b>清单</b><kbd>,</kbd> <kbd>.</kbd> 上一个／下一个对象 · <kbd>F</kbd> 适应窗口 · <kbd>Esc</kbd> 取消落点／取消选中</span>
+      <span class="sec"><b>新建</b>「＋ 新建」按当前单元建：<b>地块</b>→以选中那格为种子；<b>块区</b>→落点须在选中地块内；<b>地域与自然层</b>不可新建。没选栅格会提示先右键选一格</span><span class="sec"><b>清单</b><kbd>,</kbd> <kbd>.</kbd> 上一个／下一个对象（自然层上则是切换层）· <kbd>F</kbd> 适应窗口 · <kbd>Esc</kbd> 取消落点／取消选中</span>
       <span class="sec"><b>撤销</b><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd>，一次拖拽 = 一步</span>
       <span class="sec"><b>存档</b>自动保存（只存增量，防崩溃）· <b>保存到待合入</b>才是正式交付：写进 <code>地图/待合入/</code>，再由 <code>tools/import_editor.py</code> 合入真源<br>导出/导入在右上 <b>⋯</b></span>`;
     box.querySelector(".x").onclick = close;
@@ -1229,8 +1181,9 @@ function bindInput() {
     if (k === "escape") {
       if ($("menu").open) { $("menu").open = false; return; }
       if (document.querySelector(".report")) { document.querySelector(".report").remove(); return; }
-      state.sel[state.unit] = state.unit === "terrain" ? state.sel.terrain
-        : (state.unit === "domain" ? -1 : 0);
+      /* 取消选中：地域归 -1（含"未指派"），其余归 0。只读自然层没有选中这回事，
+         但它的键也要清（`state.sel[state.unit]` 写 undefined 会让 syncLeftSel 比中 null）。 */
+      state.sel[state.unit] = state.unit === "domain" ? -1 : 0;
       state.selCell = -1;          // 落点一起取消（帮助里写的是"Esc 取消落点／取消选中"）
       syncLeftSel(); renderInspector(); markOverlayDirty(); schedule(); return;
     }
@@ -1243,7 +1196,11 @@ function bindInput() {
     if (k === "1") { setUnit("domain"); return; }
     if (k === "2") { setUnit("plot"); return; }
     if (k === "3") { setUnit("block"); return; }
-    if (k === "4") { setUnit("terrain"); return; }
+    /* 4 / 5… 依 RO_ORDER 轮到只读自然层（编辑模式下 setUnit 会拦下并提示去视图模式） */
+    if (/^[4-9]$/.test(k)) {
+      const ro = RO_ORDER[+k - 4];
+      if (ro) { setUnit(ro); return; }
+    }
     if (k === "t") { $("ovTer").click(); return; }
     if (k === "r") { $("ovRef").click(); return; }
     if (k === "p") { $("ovEdge").click(); return; }
@@ -1257,13 +1214,20 @@ function bindInput() {
      漏量一次就变成"缓冲区被 CSS 拉伸、命中测试按旧尺寸算"，点哪儿都偏。盯住画布本身最稳。 */
   if (window.ResizeObserver) new ResizeObserver(() => { resize(); schedule(); }).observe(cv);
 }
-/* , / . —— 在当前单元的清单里前后切换对象 */
+/* , / . —— 前后切换：
+   行政单元在**自己的清单**里走一个对象；只读自然层没有"对象"，就切**层**
+   （地形 ⇄ 气候），这也让"顶栏可切自然层"多一条键盘路径。 */
 function stepObject(d) {
   const u = state.unit;
+  if (isRoUnit(u)) {
+    const i = RO_ORDER.indexOf(u);
+    const nxt = RO_ORDER[((i < 0 ? 0 : i) + d + RO_ORDER.length) % RO_ORDER.length];
+    setUnit(nxt);
+    return;
+  }
   const list = u === "domain" ? DOM.map((x, i) => i)
     : u === "plot" ? Object.keys(state.plots).map(Number).sort((a, b) => a - b)
-    : u === "block" ? Object.keys(state.blocks).map(Number).sort((a, b) => a - b)
-    : COVER_NAMES.map((x, i) => i);
+    : Object.keys(state.blocks).map(Number).sort((a, b) => a - b);
   if (!list.length) return;
   const cur = list.indexOf(state.sel[u]);
   const nxt = list[((cur < 0 ? (d > 0 ? -1 : 0) : cur) + d + list.length) % list.length];
@@ -1280,10 +1244,27 @@ function refreshAll() {
   recount(); renderLeft(); renderInspector(); renderStats();
   markOverlayDirty(); schedule();
 }
+/* 只读自然层的顶栏按钮**由 ro.js 的表生成**（index.html 里只留一个空槽与分隔符）。
+   加一层 = 表里加一条 → 按钮自己就出来了。 */
+function buildRoButtons() {
+  const box = document.getElementById("roBtns");
+  if (!box) return;
+  box.innerHTML = RO_ORDER.map((k, i) => {
+    const L = roLayer(k);
+    return `<button data-unit="${k}" title="${esc(L.n)}（只读）· ${esc(L.tip)}（${i + 4}）">`
+      + `${esc(L.n)}</button>`;
+  }).join("");
+  box.querySelectorAll("button").forEach(b => b.onclick = () => setUnit(b.dataset.unit));
+  syncRoButtons();
+}
 export function bindUI() {
-  /* 模式 / 单元 */
+  /* 模式 / 单元 —— 先造只读层的按钮，再统一挂事件（顺序反了那几个按钮就没有 onclick） */
+  buildRoButtons();
   document.querySelectorAll("#modeSeg button").forEach(b => b.onclick = () => setMode(b.dataset.mode));
-  document.querySelectorAll("#unitSeg button").forEach(b => b.onclick = () => setUnit(b.dataset.unit));
+  document.querySelectorAll("#unitSeg button").forEach(b => {
+    if (!b.dataset.unit) return;
+    if (!b.onclick) b.onclick = () => setUnit(b.dataset.unit);
+  });
   /* 笔 / 橡皮 */
   $("pentog").querySelectorAll("button[data-pen]").forEach(b =>
     b.onclick = () => setPen(b.dataset.pen === "1"));

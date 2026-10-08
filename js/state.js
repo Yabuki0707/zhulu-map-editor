@@ -5,11 +5,21 @@
 import { DATA, W, H, NC, DOM, GEO_INDEX, COLOR, UNASSIGNED, toRgb,
          plotColorFallback, PLOT_PALETTE, blockColor,
          ALPHA_ASSIGNED, ALPHA_FREE, ALPHA_PLOTMODE, ALPHA_BLOCK,
-         LS_KEY, LS_PREFIX, LS_HELP, LAY_KEY, T_PLAIN,
+         LS_KEY, LS_PREFIX, LS_HELP, LAY_KEY,
          R_DEF } from "./config.js";
 import { plotData, terrData, distData, climData, plotImg, terImg, distImg,
-         idImg, distIdImg, terRawImg, plotCtx, terCtx, distCtx, idCtx, distIdCtx, terRawCtx,
-         flushAll, putBox, BASE, EDGE_COLORS, roColor } from "./raster.js";
+         idImg, plotCtx, terCtx, distCtx, idCtx,
+         flushAll, putBox, BASE } from "./raster.js";
+/* 只读自然层：`RO_KEYS` 用来给 sel/hover 备键；`RO_VIEW` 是当前层名；
+   `roColor` 取当前层一格的色（单格重画），`rgbOf` 取**指定**层（整张缓冲用它，
+   见 repaintTerrain 的按层缓存）。 */
+import { RO_KEYS, RO_VIEW, rgbOf, roColor } from "./ro.js";
+
+/* "当前对象"的初值：三个行政单元 + **每个只读自然层一个占位键**
+   （只读层没有"对象"这回事，但 state.sel[state.unit] 处处被读，缺键会让 syncLeftSel 比中 null）。 */
+const SEL0 = { domain: 0, plot: 0, block: 0 };
+const HOVER0 = { domain: -1, plot: 0, block: 0 };     // 悬停：地域的"未指派"本身就是 -1
+for (const k of RO_KEYS) { SEL0[k] = 0; HOVER0[k] = -1; }
 
 /* ---------------- 状态 ---------------- */
 export const state = {
@@ -17,8 +27,8 @@ export const state = {
   plots: {},                       // 地块编码 → {n 名称, g 地缘下标, d 地域下标}
   blocks: {},                      // 块区编码 → {n 名称, p 所属地块编码}
   nextId: 1, nextBid: 1,
-  sel: { domain: 0, plot: 0, block: 0, terrain: T_PLAIN },   // 每个单元"当前对象"（编辑层=笔刷，视图层=选中）
-  hover: { domain: -1, plot: 0, block: 0, terrain: -1 },      // 光标下的同类对象（轻量高亮）
+  sel: Object.assign({}, SEL0),    // 每个单元"当前对象"（编辑层=笔刷，视图层=选中）
+  hover: Object.assign({}, HOVER0),   // 光标下的同类对象（轻量高亮）
   curCell: -1, selCell: -1,                        // selCell = 右键选中的那一格（新建对象的落点）
   showTerrain: true, showRef: false, showEdge: false, showBEdge: false,   // 边界线默认不画（用选中轮廓代替）
   view: { s: 1, x: 0, y: 0 },
@@ -110,18 +120,42 @@ export function writeAll(i) {
   bd[j] = bc[0]; bd[j + 1] = bc[1]; bd[j + 2] = bc[2]; bd[j + 3] = b ? ALPHA_BLOCK : 0;
   const idd = idImg.data;
   idd[j] = id & 255; idd[j + 1] = id >> 8; idd[j + 2] = 0; idd[j + 3] = 255;
-  const did = distIdImg.data;
-  did[j] = b & 255; did[j + 1] = b >> 8; did[j + 2] = 0; did[j + 3] = 255;
-  const trd = terRawImg.data; trd[j] = trd[j + 1] = trd[j + 2] = t; trd[j + 3] = 255;
 }
 export const writeCell = writeAll;
 
-/* 只重画地形那一层（切换 地形/气候 只读视图时用；不碰地块/块区，省掉秒级的全量重画） */
+/* 只重画地形那一层（切换 地形/气候 只读视图时用；不碰地块/块区）。
+   ⚠️ **按层缓存整张 RGBA 缓冲 + 一张取色 LUT**：自然层不可变（管线定稿），所以每层的像素
+   只需算一次。原先每次切换都重跑 940 万格的循环（实测 1.5–2.5 s 的卡顿，切回地块也要跑一趟）。
+   现在：第一次进某层 → 建 LUT（256 字节 × 32 气候码 = 8192 个色，约 10 ms）+ 一趟查表填缓冲
+   （约 0.2 s）；以后切换 = 一次 `set()`（37 MB 内存拷贝，约 20 ms）。
+   多花的是每层 37 MB 缓冲 —— 编辑器本来就有 8 张满分辨率画布，这点换一次性计算很值。
+   ⚠️ 缓冲必须用**那一层**的取色算（`rgbOf(key, …)`），不能图省事用 `roColor`（它读当前层，
+   切换过程中会算错一层）；`(字节 << 5) | 气候码` 就是 LUT 的下标（字节 ≤ 255、码 ≤ 31）。 */
+const roBuf = new Map(), roLut = new Map();   // 层名 → Uint8ClampedArray(NC*4) / Uint8Array(256*32*3)
 export function repaintTerrain() {
-  for (let i = 0, j = 0; i < NC; i++, j += 4) {
-    const tc = roColor(state.terr[i], climData[i]), td = terImg.data;
-    td[j] = tc[0]; td[j + 1] = tc[1]; td[j + 2] = tc[2]; td[j + 3] = 255;
+  const key = RO_VIEW;
+  let buf = roBuf.get(key);
+  if (!buf) {
+    let lut = roLut.get(key);
+    if (!lut) {
+      lut = new Uint8Array(256 * 32 * 3);
+      for (let b = 0; b < 256; b++) {
+        for (let c = 0; c < 32; c++) {
+          const rgb = rgbOf(key, b, c), o = (b * 32 + c) * 3;
+          lut[o] = rgb[0]; lut[o + 1] = rgb[1]; lut[o + 2] = rgb[2];
+        }
+      }
+      roLut.set(key, lut);
+    }
+    buf = new Uint8ClampedArray(NC * 4);
+    const t = state.terr, cl = climData;
+    for (let i = 0, j = 0; i < NC; i++, j += 4) {
+      const o = ((t[i] << 5) | (cl[i] & 31)) * 3;
+      buf[j] = lut[o]; buf[j + 1] = lut[o + 1]; buf[j + 2] = lut[o + 2]; buf[j + 3] = 255;
+    }
+    roBuf.set(key, buf);
   }
+  terImg.data.set(buf);
   terCtx.putImageData(terImg, 0, 0);
 }
 
@@ -129,8 +163,7 @@ export function repaintAll() {
   for (let i = 0; i < NC; i++) writeAll(i);
   plotCtx.putImageData(plotImg, 0, 0); terCtx.putImageData(terImg, 0, 0);
   distCtx.putImageData(distImg, 0, 0);
-  idCtx.putImageData(idImg, 0, 0); distIdCtx.putImageData(distIdImg, 0, 0);
-  terRawCtx.putImageData(terRawImg, 0, 0);
+  idCtx.putImageData(idImg, 0, 0);
   state.dirty = true;
 }
 /* 只重刷地块着色层（切换单元时用，比重建档便宜） */
@@ -168,14 +201,13 @@ export function repaintPlot(id) {
 }
 export function repaintBlock(bid) {
   const arr = cellsOfBlock.get(bid); if (!arr || !arr.length) return;
-  const col = blockRgbOf(bid), bd = distImg.data, did = distIdImg.data;
+  const col = blockRgbOf(bid), bd = distImg.data;
   for (let n = 0; n < arr.length; n++) {
     const j = arr[n] * 4;
     bd[j] = col[0]; bd[j + 1] = col[1]; bd[j + 2] = col[2]; bd[j + 3] = ALPHA_BLOCK;
-    did[j] = bid & 255; did[j + 1] = bid >> 8; did[j + 2] = 0; did[j + 3] = 255;
   }
   const b = boxOfSorted(arr);
-  putBox(distCtx, distImg, b); putBox(distIdCtx, distIdImg, b);
+  putBox(distCtx, distImg, b);
   state.dirty = true;
 }
 
@@ -428,7 +460,9 @@ export function applySnapshot(d) {
   state.blocks = d.blocks || {};
   state.nextId = d.nextId || (Math.max(0, ...Object.keys(state.plots).map(Number)) + 1);
   state.nextBid = d.nextBid || (Math.max(0, ...Object.keys(state.blocks).map(Number)) + 1);
-  state.sel = Object.assign({ domain: -1, plot: 0, block: 0, terrain: T_PLAIN }, d.sel || {});
+  /* 存档里的 sel 优先级低于 SEL0：老存档里"terrain"那个键现在只是个占位（只读层没有选中对象），
+     但它必须仍在，否则 state.sel[state.unit] 会是 undefined。 */
+  state.sel = Object.assign({}, SEL0, d.sel || {});
   if (d.unit) state.unit = d.unit;
   state.hist = []; state.histAt = -1;
 }

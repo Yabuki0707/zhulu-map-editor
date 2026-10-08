@@ -15,13 +15,14 @@
     <button data-mode="view" title="视图：平移缩放、点选查看（V）">视图</button>
     <button data-mode="edit" aria-pressed="true" title="编辑：涂抹光标下的对象（E）">编辑</button>  </div>
 
-  <div class="seg" id="unitSeg" role="group" aria-label="单元（视图层／编辑层）">
+  <!-- 单元条：三个可编辑的（写死）＋ 只读自然层（由 js/ro.js 的 RO_ORDER 生成，
+       编辑模式下整组连分隔符一起隐藏 —— 自然层不属于编辑层）。 -->
+  <div class="seg" id="unitSeg" role="group" aria-label="单元（三个可编辑单元 + 只读自然层）">
     <button data-unit="domain"  title="地域 · 编辑对象是地块（1）">地域</button>
     <button data-unit="plot"    aria-pressed="true" title="地块 · 编辑对象是栅格（2）">地块</button>
     <button data-unit="block"   title="块区 · 编辑对象是所属地块内的栅格（3）">块区</button>
-    <span class="usep" role="presentation"></span>
-    <button data-unit="terrain" title="地形（只读）· 覆盖 × 形态，管线定稿；按显示类统计（4）">地形</button>
-    <button data-unit="climate" title="气候（只读）· 热量带 × 干湿，管线定稿（柯本）（5）">气候</button>
+    <span class="usep" id="roSep" role="presentation" hidden></span>
+    <span id="roBtns" style="display:contents"></span>
   </div>
 
   <div class="brushbox" id="brushbox">

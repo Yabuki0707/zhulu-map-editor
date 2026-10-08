@@ -1,6 +1,8 @@
 /* ==========================================================================
-   config.js —— 常量、四个单元（地域/地块/块区/地形）、调色、地形图例
+   config.js —— 常量、三个**可编辑**单元（地域/地块/块区）、调色、图例
    数据入口：js/data.js（由 tools/build_raster.py 生成，勿手改）
+   只读自然层（地形/气候）不在这里：它们由 js/ro.js 的 `RO_LAYERS` 描述、并**注册**进来
+   （见下面的 registerUnits）——加一层只改 ro.js 那张表，本文件一行不用动。
    ========================================================================== */
 
 import { RASTER_DATA } from "./data.js";
@@ -19,12 +21,11 @@ export const LS_HELP = LS_PREFIX + "help.v3";
 /* 笔刷半径（格）：1 = 单格；上限 50（默认格 0.0625° × 50 ≈ 347 km） */
 export const R_MIN = 1, R_MAX = 50, R_DEF = 4;      // R_DEF = 启动默认半径（index.html 的初始 SVG 也标 4）
 /* ---- 地形字节（v3）：**一个字节 = 覆盖(高 4 位) × 16 + 形态(低 4 位)** ----
-   覆盖 12 类：0海洋 1湖泊 2河流 3冰川 4森林 5草原 6荒漠 7沼泽 8滩涂 9盐沼 10农田 11绿洲
-   形态 5 类：0无（水冰格）1平原 2丘陵 3高原 4山地
+   覆盖 12 类：0海洋 1湖泊 2河流 3冰川 4森林 5草原 6荒漠 7沼泽 8滩涂 9盐沼 10草甸 11绿洲
+   形态 4 类：0平原 1丘陵 2高原 3山地（海洋格写 0 当 don't-care）
    打解包在 tools/terrain.py 的 pack()/unpack()；契约见 docs/adr/0007。 */
 export const T_OCEAN = 0;             // 覆盖 0 ∧ 形态 0 —— **海洋恰好是字节 0**，判海陆仍只看它
-export const T_PLAIN = (5 << 4) | 1;  // 「草原∧平原」的一个合法字节，只作"当前对象"占位
-/* ⚠️ 下面四个是**覆盖码**，不是字节。要比对必须先 `字节 >> 4`（见 raster.js 的 TER_THIN 用法）。
+/* ⚠️ 下面四个是**覆盖码**，不是字节。要比对必须先 `字节 >> 4`（见 raster.js 的地形金字塔用法）。
    细线类（河、湖、冰川）降采样时必须保住，否则缩到全图整条消失；顺序即优先级。 */
 export const C_OCEAN = 0, C_LAKE = 1, C_RIVER = 2, C_ICE = 3;
 export const T_LAKE = C_LAKE, T_RIVER = C_RIVER, T_ICE = C_ICE;
@@ -32,21 +33,19 @@ export const TER_THIN = [C_RIVER, C_LAKE, C_ICE];
 
 
 /* --------------------------------------------------------------------------
-   **五个单元，分两组**（2026-10-09 重构）：
-     行政（可编辑）地域 / 地块 / 块区  ‖  自然（只读）地形 / 气候
-   自然层是**产品层**、管线定稿，编辑器只能看（docs/adr/0001、0006、0007）：
-   地形 = 覆盖 × 形态 两个半字节；气候 = 热量带 × 干湿 一个字节。
-   （地理区层还没建，建好后照气候这同一套挂进来即可。）
+   **单元**：编辑层能碰的只有三个（地域 / 地块 / 块区），全是行政图上的东西。
+   自然层（地形 / 气候）是**产品层**、管线定稿，编辑器只能看（docs/adr/0001、0006、0007），
+   所以它们**不在这里**——由 js/ro.js 的 `RO_LAYERS` 描述，并在模块载入时经
+   `registerUnits()` 注册进来。于是「加一层自然层」= 在 ro.js 那张表里加一个描述物件：
+   按钮、左栏面板、右栏检视器、配色、统计口径全从它派生，本文件与 ui.js 一行不动。
 
-   旧版把"地形"当第四个单元混在行政里，气候根本没有入口——那已经不适配现在的模型了。
+   （2026-10-09 之前这里手写着五个单元，地形混在行政里、气候根本没有入口；加一层要同时改
+   config / ui / render / index.html 四处，那是"按单元硬编码"。地理区层同日裁掉，见 ADR 0006。）
 
-   视图层与编辑层共用同一组对象，但**自然层是只读的**（docs/adr/0001）：
-   地形图由管线从 ETOPO 高程 + Copernicus LC100 土地覆盖算出，将来还要当规则层
-   "基础地形代价"的来源 —— 让人用笔刷随手改模拟底数，一笔划过就会静默改掉行军耗时。
-   于是地形只在**视图模式**里作为图例与占比出现；编辑模式里没有这个单元。
-
-     layer  —— 它决定底图用哪一层着色（plot=地块层 / dist=块区层 / terrain=地形层）
-     obj    —— 它的编辑对象（写在界面上，说明"改的是什么"）
+     k        —— 单元键（也是按钮的 data-unit）
+     n        —— 界面上显示的名字
+     layer    —— 底图用哪一层着色（plot=地块层 / dist=块区层 / 自然层由 ro.js 给）
+     obj      —— 它的编辑对象（写在界面上，说明"改的是什么"）
      viewOnly —— true = 只读单元，编辑模式下不出现、没有笔刷
    -------------------------------------------------------------------------- */
 export const UNITS = [
@@ -56,25 +55,31 @@ export const UNITS = [
     group: "行政" },
   { k: "block",   n: "块区", layer: "dist",    obj: "地块内的栅格", tip: "点/拖：在所属地块的范围内画块区",
     group: "行政" },
-  { k: "terrain", n: "地形", layer: "terrain", obj: "（只读）",    group: "自然", viewOnly: true,
-    tip: "地形 = 覆盖(高 4 位) × 形态(低 4 位)，管线定稿；这里按**显示类**统计" },
-  { k: "climate", n: "气候", layer: "climate", obj: "（只读）",    group: "自然", viewOnly: true,
-    tip: "气候 = 热量带 × 干湿，管线定稿（柯本）；这里看两轴交叉与占比" },
 ];
-export const UNIT = {};
+/* ⚠️ **null 原型**：单元名是从存档/键盘/按钮来的字符串，而 `UNIT["constructor"]` 在普通对象上
+   会命中 `Object.prototype`（真值）——于是 `isEditable("constructor")` 为真、编辑器会把当前单元
+   设成一个"看着像存在"的单元，随后 `UNIT[unit].tip` 是 undefined、底图两层都不画。
+   用空原型把这一整类原型链误判关掉（`UNIT["toString"]` 同理）。 */
+export const UNIT = Object.create(null);
 for (const u of UNITS) UNIT[u.k] = u;
+/* 只读自然层注册口。**在调用时读 UNIT**，所以注册晚于本文件载入也没关系
+   （模块图里 ro.js 依赖 config.js，一定在它之后求值）。 */
+export function registerUnits(list) {
+  for (const u of list) if (u && u.k && !UNIT[u.k]) { UNIT[u.k] = u; UNITS.push(u); }
+}
 export const unitOf = k => UNIT[k] || UNITS[1];
 export const unitLabel = k => unitOf(k).n;
 /* 能不能在编辑模式下当笔刷用（工单 §4.4 叫它 viewOnly） */
 export const isEditable = k => !!(UNIT[k] && !UNIT[k].viewOnly);
+/* ⚠️ 在 config 载入时求值 → 只含三个可编辑单元；自然层天然不在其中（它们本来就是只读的） */
 export const EDIT_UNITS = UNITS.filter(u => !u.viewOnly);
 
 export const MODES = [{ k: "view", n: "视图" }, { k: "edit", n: "编辑" }];
 
 /* ---------------- 地形配色与图例（顺序即编码，由 js/data.js 给） ---------------- */
 export const COVER_NAMES = DATA.cover_legend;       // 覆盖 12 类
-export const FORM_NAMES = DATA.form_legend;         // 形态 5 类
-/* 12 个**覆盖**的基础色。图上真正的颜色还叠形态与气候（雨林/针叶林/沙漠/戈壁/河谷农田…），
+export const FORM_NAMES = DATA.form_legend;         // 形态 4 类
+/* 12 个**覆盖**的基础色。图上真正的颜色还叠形态与气候（雨林/针叶林/沙漠/戈壁/高山草甸…），
    由 data.js 的 display_classes 派生——色相由覆盖定、形态只调明暗，免得组合炸成一片糊。
    改色只需改 tools/display_class.py 的那张表，这里跟着它走。 */
 export const TER_COLORS = [
@@ -86,15 +91,29 @@ export const coverColor = c => TER_COLORS[c] || "#cccccc";
    表是有序的、`null` 通配，首命中生效；规则与配色同源于 tools/display_class.py。 */
 export const DISPLAY_RULES = DATA.display_classes || [];
 export const CLIMATE = DATA.climate_legend || { heat: [], moist: [], encoding: "" };
-export function displayOf(cover, form, heat, moist) {
-  for (const r of DISPLAY_RULES) {
+export function displayIndexOf(cover, form, heat, moist) {
+  /* 命中的规则**下标**（找不到 → -1）。为什么要有这个版本：只读层的统计要的是"桶号"，
+     而每格现造一个对象（displayOf）在 940 万格的循环里就是 940 万个临时对象。
+     规则表有序、`null` 通配、首命中生效——与 tools/display_class.py 的 label() 同源。 */
+  for (let i = 0; i < DISPLAY_RULES.length; i++) {
+    const r = DISPLAY_RULES[i];
     if (r.cover != null && r.cover !== cover) continue;
     if (r.form != null && r.form !== form) continue;
     if (r.heat != null && r.heat !== heat) continue;
     if (r.moist != null && r.moist !== moist) continue;
-    return r;
+    return i;
   }
-  return null;
+  return -1;
+}
+export function displayOf(cover, form, heat, moist) {
+  const i = displayIndexOf(cover, form, heat, moist);
+  return i < 0 ? null : DISPLAY_RULES[i];
+}
+/* 显示类名字（查不到就退回"覆盖 · 形态"，绝不返回 undefined） */
+export function displayName(cover, form, heat, moist) {
+  const r = displayOf(cover, form, heat, moist);
+  if (r) return r.n;
+  return `${COVER_NAMES[cover] || "覆盖" + cover}${form ? "·" + (FORM_NAMES[form] || form) : ""}`;
 }
 export const terColor = (byte, kl) => {
   /* byte 是地形那个字节；kl = 该格的气候码（热量带×8+干湿），可选。
@@ -118,18 +137,11 @@ export const climateColor = code => {
   if (m === 0) return "#c9d5dd";                        // 寒带（也吸收"无气候数据"）
   return `hsl(${HEAT_HUE[h] ?? 100} ${MOIST_S[m]}% ${MOIST_L[m]}%)`;
 };
-/* 只读自然层的**当前预览对象**（"terrain" | "climate"）。放在这里是因为
-   raster.js 与 state.js 都要读它，而 state→raster 有依赖，不能让 raster 反向 import。 */
-export let RO_VIEW = "terrain";
-export const setRoView = v => { RO_VIEW = v === "climate" ? "climate" : "terrain"; };
-
-export const terName = byte => {
-  const c = (byte | 0) >> 4, f = (byte | 0) & 15;
-  const cn = COVER_NAMES[c] || `覆盖 ${c}`;
-  return f ? `${cn}·${FORM_NAMES[f] || f}` : cn;
-};
-
-
+/* 只读自然层的**当前预览层**（"terrain" | "climate" | …）与它的一格取色 `roColor(字节, 气候码)`
+   都搬到了 js/ro.js —— 那里的 `RO_LAYERS` 才是"一层自然层是什么"的唯一出处。
+   本文件只提供纯色函数（coverColor / terColor / climateColor），不含任何具体自然层的知识。
+   （原先这里还有个 `terName(字节)` 把"覆盖·形态"拼成一个词给界面用；两处界面现在都走
+   ro.js 的 `cellFields`——它还要报热量带/干湿/显示类，见 render.js 的左下角读数。） */
 
 /* ---------------- 地域 / 地块配色 ---------------- */
 export const GEO_INDEX = {}; DATA.palette.forEach((g, i) => GEO_INDEX[g.geo] = i);
