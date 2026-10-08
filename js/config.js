@@ -55,16 +55,40 @@ export const MODES = [{ k: "view", n: "视图" }, { k: "edit", n: "编辑" }];
 
 /* ---------------- 地形配色与图例（图例顺序即编码，由 js/data.js 给） ---------------- */
 export const TER_NAMES = DATA.terrain_legend;
-/* 16 类地形的配色：编码次序见 tools/terrain.py 的 LEGEND
-   0 海洋 1 湖泊 2 河流 3 冰川 4 沙漠 5 裸地 6 高原 7 山地 8 丘陵 9 平原
-   10 针叶林 11 阔叶林 12 雨林 13 草原 14 沼泽 15 苔原
-   三档绿（针叶/阔叶/雨林）与海洋底色 #7fa6c4 明度差得开，缩到全图也不会和海水混成一片。 */
+/* 14 类地形的**基础**配色：编码次序见 tools/terrain.py 的 LEGEND（v2 契约，ADR 0006）
+   0 海洋 1 湖泊 2 河流 3 冰川 | 4 森林 5 草原 6 荒漠 7 沼泽 8 滩涂 9 绿洲 | 10 平原 11 丘陵 12 高原 13 山地
+   森林那一格是"没有气候信息时的底色"；图上真正的四种绿由 `DATA.display_classes`
+   按「森林 × 热量带」当场派生出（雨林/常绿阔叶/落叶阔叶/针叶），见 js/render.js。
+   改色只需改 tools/display_class.py 的那张表，这里跟着它走。 */
 export const TER_COLORS = [
-  "#7fa6c4", "#6ea8d8", "#5b8fc7", "#eef4f8", "#e3cf9a", "#cdbb96", "#c2ab7e", "#a98a62",
-  "#c8b98f", "#cfe0a8", "#4f7a4a", "#6f9c4a", "#2f6b3a", "#b9c68a", "#8fa98a", "#b8c4b0",
+  "#7fa6c4", "#6ea8d8", "#5b8fc7", "#eef4f8",
+  "#4f7a4a", "#b9c68a", "#cdbb96", "#8fa98a", "#b0ab94", "#86c06a",
+  "#cfe0a8", "#c8b98f", "#c2ab7e", "#a98a62",
 ];
-export const terColor = t => TER_COLORS[t] || "#cccccc";
+export const terColor = (t, kl) => {
+  /* kl = 该格的气候码（热量带×8+干湿），可选。给了就按「覆盖 × 气候」派生色
+     （森林因此分出雨林/常绿阔叶/落叶阔叶/针叶四种绿，见 data.js 的 display_classes）；
+     不给（图例、兜底路径）就用基础色。 */
+  if (kl != null && DISPLAY_RULES.length) {
+    const r = displayOf(t, kl >> 3, kl & 7);
+    if (r && r.c) return r.c;
+  }
+  return TER_COLORS[t] || "#cccccc";
+};
 export const terName = t => TER_NAMES[t] || `地形 ${t}`;
+/* 显示类：把「地形（覆盖）× 气候（热量带×干湿）」叠起来看的名字与颜色。
+   表是有序的、`null` 通配，首命中生效；规则与配色同源于 tools/display_class.py。 */
+export const DISPLAY_RULES = DATA.display_classes || [];
+export const CLIMATE = DATA.climate_legend || { heat: [], moist: [], encoding: "" };
+export function displayOf(ter, heat, moist) {
+  for (const r of DISPLAY_RULES) {
+    if (r.cover !== ter) continue;
+    if (r.heat != null && r.heat !== heat) continue;
+    if (r.moist != null && r.moist !== moist) continue;
+    return r;
+  }
+  return null;
+}
 
 
 

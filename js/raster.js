@@ -49,6 +49,9 @@ export const terRawImg = terRawCtx.createImageData(W, H);
 export const plotData = new Uint16Array(NC);
 export const terrData = new Uint8Array(NC);
 export const distData = new Uint16Array(NC);
+/* 气候码层（热量带×8+干湿，0..31）。只用来给地形**派生显示色**——森林的四种绿靠它，
+   地形本身仍然是那 14 类（ADR 0006）。它是只读产品层，编辑器不写它。 */
+export const climData = new Uint8Array(NC);
 
 export const BASE = { plot: null, terr: null, dist: null };
 export function freezeBase() {
@@ -72,6 +75,7 @@ export async function decodeAll() {
     loadImg(DATA.plot_png), loadImg(DATA.terrain_png),
     DATA.dist_png ? loadImg(DATA.dist_png) : Promise.resolve(null),
   ]);
+  const ci = DATA.climate_png ? await loadImg(DATA.climate_png).catch(() => null) : null;
   c.drawImage(pi, 0, 0, W, H);
   const d1 = c.getImageData(0, 0, W, H).data;
   c.clearRect(0, 0, W, H); c.drawImage(ti, 0, 0, W, H);
@@ -79,10 +83,16 @@ export async function decodeAll() {
   c.clearRect(0, 0, W, H);
   if (di) c.drawImage(di, 0, 0, W, H);
   const d3 = di ? c.getImageData(0, 0, W, H).data : null;
+  c.clearRect(0, 0, W, H);
+  /* 气候层是 8 位灰度，canvas 会把它摊成 RGBA —— 取 R 通道即原值。
+     缺它也不崩：显示色退回基础色（森林只有一种绿），其余功能不受影响。 */
+  if (ci) c.drawImage(ci, 0, 0, W, H);
+  const d4 = ci ? c.getImageData(0, 0, W, H).data : null;
   for (let i = 0, j = 0; i < NC; i++, j += 4) {
     plotData[i] = d1[j] | (d1[j + 1] << 8);
     terrData[i] = d2[j];
     if (d3) distData[i] = d3[j] | (d3[j + 1] << 8);
+    if (d4) climData[i] = d4[j] & 31;
   }
   for (const ctx of [idCtx, distIdCtx, terRawCtx]) ctx.imageSmoothingEnabled = false;
   freezeBase();
@@ -146,11 +156,13 @@ export function buildMips(src, w, h, maxLevel, orLevels = 1) {
 export let TER_MIPS = null;
 export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
   const levels = [null];                       // 0 级直接用现成的 terCanvas，不在这里建
-  let cw = W, ch = H, cur = terrData;
+  let cw = W, ch = H, cur = terrData, curC = climData;
   for (let l = 1; l <= maxLevel; l++) {
     const nw = Math.max(1, cw >> 1), nh = Math.max(1, ch >> 1), nd = new Uint8Array(nw * nh);
+    const ndc = new Uint8Array(nw * nh);         // 同级的**气候码**降采样，供派生显示色
     const need = l <= thinLevels ? 1 : 2;
     const cnt = new Uint8Array(TER_NAMES.length);
+    const cntC = new Uint8Array(32);
     for (let y = 0; y < nh; y++) {
       const r0 = 2 * y * cw, r1 = Math.min(2 * y + 1, ch - 1) * cw;
       for (let x = 0; x < nw; x++) {
@@ -170,10 +182,17 @@ export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
           pick = best;
         }
         nd[y * nw + x] = pick;
+        /* 气候码取 2×2 的多数决（并列取先出现者）。它只影响配色，取众数足够稳。 */
+        const ca = curC[r0 + x0], cb = curC[r0 + x1], cc = curC[r1 + x0], cd = curC[r1 + x1];
+        cntC[ca]++; cntC[cb]++; cntC[cc]++; cntC[cd]++;
+        let bc = ca, bnC = 0;
+        for (let i = 0; i < 32; i++) if (cntC[i] > bnC) { bnC = cntC[i]; bc = i; }
+        cntC[ca] = cntC[cb] = cntC[cc] = cntC[cd] = 0;
+        ndc[y * nw + x] = bc;
       }
     }
-    levels.push({ w: nw, h: nh, data: nd });
-    cw = nw; ch = nh; cur = nd;
+    levels.push({ w: nw, h: nh, data: nd, clim: ndc });
+    cw = nw; ch = nh; cur = nd; curC = ndc;
   }
   TER_MIPS = levels;
   return levels;
@@ -186,8 +205,9 @@ export function terMipCanvas(level) {
   cv = makeCanvas(level.w, level.h);
   const c = cv.getContext("2d");
   const im = c.createImageData(level.w, level.h), d = im.data, s = level.data;
+  const sc = level.clim;
   for (let i = 0, j = 0; i < s.length; i++, j += 4) {
-    const rgb = toRgb(terColor(s[i]));
+    const rgb = toRgb(terColor(s[i], sc ? sc[i] : null));
     d[j] = rgb[0]; d[j + 1] = rgb[1]; d[j + 2] = rgb[2]; d[j + 3] = 255;
   }
   c.putImageData(im, 0, 0);
