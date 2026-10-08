@@ -453,8 +453,14 @@ export function seedPlots() {
   }
   state.nextId = Math.max(1, ...DATA.plots.map(p => p.id)) + 1;
   state.sel.plot = DATA.plots[0] ? DATA.plots[0].id : 0;
+  /* 块区底稿：管线的 `districts` 是 `{id, name, plot}`（工单 §3.1 的形状）。
+     不读它的话，栅格里的块区像元虽然画得出来，编辑器却不知道它们的名字与归属
+     ——列表里全是「块区 123」，「越界」检查也无从判起。 */
   state.blocks = {};
-  state.nextBid = 1;
+  for (const b of (DATA.districts || [])) {
+    state.blocks[b.id] = { n: b.name, p: (b.plot | 0) };
+  }
+  state.nextBid = Math.max(1, ...(DATA.districts || []).map(b => b.id)) + 1;
 }
 
 /* ---------------- 一致性检查：块区是否越出所属地块 ---------------- */

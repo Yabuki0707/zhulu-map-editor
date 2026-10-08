@@ -339,10 +339,15 @@ function renderBlockPanel() {
   leftSub.textContent = leftSubText();
   const q = searchText.trim().toLowerCase();
   const ids = Object.keys(state.blocks).map(Number).sort((a, b) => a - b);
-  const rows = ids.filter(id => {
+  let rows = ids.filter(id => {
     const b = state.blocks[id];
     return !q || (b.n || "").toLowerCase().includes(q) || String(id) === q;
   });
+  /* 块区底稿一进来就是**几千个**（中华＝县）。一次渲染几千行会把界面卡住几秒，
+     所以只画前 200 行，并在下面写明"还有多少没显示、用搜索找"。 */
+  const ROW_CAP = 200;
+  const hidden = Math.max(0, rows.length - ROW_CAP);
+  rows = rows.slice(0, ROW_CAP);
   leftBody.innerHTML = `<div class="searchwrap"><input type="search" id="q" placeholder="搜索块区…" value="${q.replace(/"/g, "&quot;")}"></div>`
     + (rows.length ? rows.map(id => {
         const b = state.blocks[id], stray = b.p ? blockStrays(id) : 0;
@@ -352,7 +357,8 @@ function renderBlockPanel() {
           + `<span class="nm">${esc(b.n || "块区 " + id)}<br><span class="mut" style="font-size:10.5px">${esc(owner)}</span></span>`
           + `<span class="n" data-cnt="${id}"></span>`
           + (stray ? `<span class="tag">越界 ${stray}</span>` : "") + `</div>`;
-      }).join("") : `<div class="empty">还没有块区。点右上「＋ 新建」，再在地图上涂。</div>`);
+      }).join("") + (hidden ? `<div class="empty">还有 ${hidden} 个未显示（搜索可缩小范围）</div>` : "")
+      : `<div class="empty">还没有块区。点右上「＋ 新建」，再在地图上涂。</div>`);
   afterPanelRender();
 }
 /* — 地形（只读；docs/adr/0001）— */
