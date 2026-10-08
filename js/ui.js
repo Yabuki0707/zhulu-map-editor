@@ -15,7 +15,7 @@ import { RO_KEYS, RO_ORDER, roLayer, isRoUnit, esc, buildRoStats,
          setRoView, RO_VIEW, cellFields } from "./ro.js";
 import { BASE, idCanvas, flushAll, climData } from "./raster.js";
 import { loadRef, REF } from "./refvec.js";
-import { state, recount, getCellsOf, getPlotCells, getCellsOfBlock, getBlockCells, repaintAll, repaintPlotLayer, newPlot, newBlock, componentsOf, splitComponent, scanParts, setPlotDomain, setPlotName, setBlockOwner, setBlockName, undo, redo, saveNow, autosave, snapshot, applySnapshot, seedPlots, clearSave, dropMeta, ID_MAX, domCells, cellsWithPlot, cellsWithBlock, blockStrays, touched, beginGesture, writeAll, repaintTerrain } from "./state.js";
+import { state, recount, getCellsOf, getPlotCells, getCellsOfBlock, getBlockCells, repaintAll, repaintPlotLayer, ensurePlotLayerMode, newPlot, newBlock, componentsOf, splitComponent, scanParts, setPlotDomain, setPlotName, setBlockOwner, setBlockName, undo, redo, saveNow, autosave, snapshot, applySnapshot, seedPlots, clearSave, dropMeta, ID_MAX, domCells, cellsWithPlot, cellsWithBlock, blockStrays, touched, beginGesture, writeAll, repaintTerrain } from "./state.js";
 import { cv, resize, fit, FIT, schedule, markOverlayDirty, setSpace, setCursorText,
          viewSize, toCell, centerOn, anchorCell, buildEdgesNow, dropOutlineCache,
          markEdgesDirty, dropRefPathCache } from "./render.js";
@@ -63,7 +63,7 @@ export function setMode(m, silent) {
   document.querySelectorAll("#modeSeg button").forEach(b =>
     b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
   syncRoButtons();
-  if (coerceUnit()) { repaintPlotLayer(); syncUnitButtons(); }
+  if (coerceUnit()) { ensurePlotLayerMode(); syncUnitButtons(); }
   cv.style.cursor = m === "view" ? "grab" : (state.pen ? "crosshair" : "cell");
   $("hint").textContent = m === "view"
     ? "视图：拖拽平移 · 滚轮缩放 · 左右键都可点选对象 · 顶栏右侧可切自然层（只读）"
@@ -90,7 +90,7 @@ export function setUnit(u) {
   if (RO_VIEW !== want) { setRoView(want); repaintTerrain(); }
   searchText = "";
   syncUnitButtons();
-  repaintPlotLayer();                       // 地块层着色口径随单元变（边界线不受影响，不必重建）
+  ensurePlotLayerMode();                    // 着色口径真的变了才重刷（切只读层时不变，省约 1 s）
   setMode(state.mode, true);
   renderLeft(); renderInspector(); markOverlayDirty(); schedule();
 }

@@ -168,6 +168,7 @@ export function repaintAll() {
 }
 /* 只重刷地块着色层（切换单元时用，比重建档便宜） */
 export function repaintPlotLayer() {
+  plotMode = plotColorMode();
   const pd = plotImg.data;
   for (let i = 0, j = 0; i < NC; i++, j += 4) {
     const id = state.plot[i], col = plotRgbOf(id);
@@ -175,6 +176,15 @@ export function repaintPlotLayer() {
   }
   plotCtx.putImageData(plotImg, 0, 0);
   state.dirty = true;
+}
+/* 着色口径（按地块编码 / 按地域）**只在单元切换时变**：`setUnit` 原先无条件重刷这 944 万格，
+   而切进/切出只读自然层时口径根本没变（两边都是"按地域"）—— 实测那一下约 1 s，
+   是只读层切换三分之一的耗时。这里只在口径真的变了时才重画。
+   ⚠️ 别改成"记住单元"：`createPlotAt`（新建地块）与 `buildEdgesNow`（重算邻接着色）之后
+   必须**无条件**重画，它们走 repaintPlotLayer 本体，不走这个。 */
+let plotMode = null;
+export function ensurePlotLayerMode() {
+  if (plotMode !== plotColorMode()) repaintPlotLayer();
 }
 /* 只重绘某地块 / 某块区（涂地域、改归属时避免整图重绘）。
    回写只走这个对象的**包围盒**：cellsOf 的数组是计数排序产出的（下标升序），

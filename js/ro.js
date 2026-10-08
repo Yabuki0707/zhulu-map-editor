@@ -9,9 +9,11 @@
        title / sub              左栏抬头与副标题
        rgb(字节, 气候码)        一格的取色 —— 满分辨率画布与金字塔都走它
        bucket(字节, 气候码)     一格记进哪个统计桶（-1 = 不计入）
+       oceanBucket()            海洋格记进哪个桶（-1 = 不计入；见 buildRoStats 的口径）
        bucketCount()            桶的个数
        bucketLabel(桶号)        桶 → {名字, 颜色}
        panel(stats)             左栏那张图（简单层用共享的 roListPanel，气候用 4×7 网格）
+       legendNote()             面板开头那一行口径说明
        note(stats)              面板脚注（说明口径）
        insp(stats)              右栏检视器正文
 
@@ -23,7 +25,8 @@
    ========================================================================== */
 
 import { COVER_NAMES, FORM_NAMES, coverColor, terColor, toRgb, climateColor,
-         DISPLAY_RULES, displayIndexOf, CLIMATE, registerUnits } from "./config.js";
+         DISPLAY_CLASSES, DISPLAY_ENCODING, displayIndexOf, CLIMATE,
+         registerUnits } from "./config.js";
 
 export const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const pct = (n, N) => N ? n / N * 100 : 0;
@@ -47,7 +50,10 @@ export function roListPanel(layer, stats) {
       + `<span class="sw" style="background:${c || "#cccccc"}"></span>`
       + `<span class="nm">${esc(n)}</span>`
       + `<span class="n">${pct(v, stats.cells).toFixed(2)}%</span></div>`).join("");
-  return body + `<div class="mut" style="padding:6px 9px;font-size:10.5px">${layer.note(stats)}</div>`;
+  /* 开头一行口径说明（`legendNote`）：这一列到底是什么。地形那一层靠它把
+     "地形 = 覆盖 × 形态 × 气候 = 显示类"这句话摆在图例正上方，别处不必再解释一遍。 */
+  return `<div class="mut" style="padding:6px 9px 2px;font-size:10.5px">${layer.legendNote()}</div>`
+    + body + `<div class="mut" style="padding:6px 9px;font-size:10.5px">${layer.note(stats)}</div>`;
 }
 /* 桶 → [名字, 格数, 颜色]，按格数降序。同名桶（如"荒漠草原"的两档干湿）合并成一行。 */
 export function roRows(layer, stats) {
@@ -78,23 +84,27 @@ export function cellFields(byte, code) {
   const ocean = c === 0;
   const k = (code | 0) & 31, h = k >> 3, m = k & 7;
   const polar = !ocean && m === 0;                       // 干湿 0 = 寒带
-  const di = (ocean || polar) ? -1 : displayIndexOf(c, f, h, m);
+  /* 显示类**一律查表**（v4）：寒带格以前也被跳过，于是"苔原/寒沼"这些格在读数里
+     只写成"草原·平原"这种拼凑名 —— 明明有正经名字。现在只有 data.js 缺项才回退。 */
+  const di = displayIndexOf(byte, code);
   return {
     ocean, polar,
     cover: COVER_NAMES[c] || `覆盖 ${c}`,
     form: FORM_NAMES[f] || `形态 ${f}`,
     heat: (ocean || polar) ? "—" : (CLIMATE.heat[h] || "?"),
     moist: ocean ? "—" : (CLIMATE.moist[m] || "?"),
-    display: ocean ? "海洋"
-      : (di < 0 ? `${COVER_NAMES[c]}·${FORM_NAMES[f]}` : DISPLAY_RULES[di].n),
+    display: di >= 0 ? DISPLAY_CLASSES[di].n
+      : (ocean ? "海洋" : `${COVER_NAMES[c] || "覆盖" + c}·${FORM_NAMES[f] || f}`),
   };
 }
 
 /* ================================================================ 统计（一次遍历喂所有层） */
 /* 为什么一次遍历：940 万格的循环，每层各跑一遍就是几秒。
-   口径有三条，写在这里一次说清：
-     · **海洋不进显示类/气候桶**：它的气候码恒为 0，混进气候层会让"寒带"凭空多出
-       6,400 万格（实测过）；显示类里它也只是"海洋"一行，没有信息量。
+   口径三条，写在这里一次说清：
+     · **海洋要不要算，由层自己答**（`oceanBucket()`）：地形层要 —— 海洋是它的一个正经显示类
+       （占全图 68.3%），图例里少了它，与页脚读数、与图上的颜色都对不上；
+       气候层不要 —— 海洋的气候码恒 0，混进来会让"寒带"凭空多出 6,400 万格（实测过）。
+       早先这里是一刀切"海洋不进任何桶"，那是 v4 之前的口径，现在过时了。
      · **覆盖直方图 `byCover` 含海洋**：海洋是覆盖 0，占全图 68.3%，是最大的一类——
        检视器里"各覆盖占比"少掉它就是错的（本条是被子代理验收抓出来的）。
      · **形态直方图 `byForm` 只算陆地**：海洋格的形态位是 don't-care（恒 0），
@@ -104,17 +114,26 @@ export function buildRoStats(terr, clim) {
   const by = {}, byCover = new Int32Array(16), byForm = new Int32Array(16);
   let land = 0;
   for (const k of RO_ORDER) by[k] = new Int32Array(RO_LAYERS[k].bucketCount());
+  /* 热循环里别做属性查找：把每层的 bucket() 与它的桶数组先取出来（944 万格 × 每层一次调用）。 */
+  const keys = RO_ORDER, fns = keys.map(k => RO_LAYERS[k].bucket), arrs = keys.map(k => by[k]);
+  /* 海洋格（占全图 68.3%）**单独一条路**：要不要它、记进哪个桶，由各层自己的 `oceanBucket()`
+     说了算（见层描述里的说明）。让它走下面那趟每层一次的调用，光是 645 万格的重复查表实测
+     就要多花 0.35 s。 */
+  const ocean = keys.map(k => [by[k], RO_LAYERS[k].oceanBucket()]).filter(p => p[1] >= 0);
   for (let i = 0; i < N; i++) {
     const b = terr[i], c = b >> 4;
     byCover[c]++;
-    if (c === 0) continue;                          // 海洋：到此为止（见上面三条口径）
+    if (c === 0) {
+      for (let n = 0; n < ocean.length; n++) ocean[n][0][ocean[n][1]]++;
+      continue;
+    }
+    const code = (clim[i] || 0) & 31;
+    for (let n = 0; n < fns.length; n++) {
+      const j = fns[n](b, code);
+      if (j >= 0) arrs[n][j]++;
+    }
     land++;
     byForm[b & 15]++;
-    const code = (clim[i] || 0) & 31;
-    for (const k of RO_ORDER) {
-      const bid = RO_LAYERS[k].bucket(b, code);
-      if (bid >= 0) by[k][bid]++;
-    }
   }
   return { land, cells: N, by, byCover, byForm };
 }
@@ -130,39 +149,53 @@ const bar = (n, v, N, c) =>
   `<div class="bar"><i style="background:${c}"></i><span>${esc(n)}</span>`
   + `<span class="v">${fmtPct(v, N)}</span></div>`;
 
-/* ---- 地形：覆盖 × 形态 × 气候 → 显示类（名字与配色来自 data.js 的 display_classes） ---- */
+/* ---- 地形：覆盖 × 形态 × 气候 = **显示类**（名字与配色来自 data.js 的 display_classes） ----
+   「地形即显示类」：这一层对外只有一套名字——查 `display_lut`。覆盖与形态是**存储**口径
+   （一个字节的两个半字节），只在检视器的两张占比条里单独露面。 */
 const TERRAIN = {
   k: "terrain", n: "地形", group: "自然", viewOnly: true, obj: "（只读）",
   layer: "terrain",                       // 底图用哪一层着色（render.js 的 draw() 读它；
                                           // 两个只读层都画在 terCanvas 上，所以同值）
-  tip: "地形 = 覆盖(高 4 位) × 形态(低 4 位)，管线定稿；这里按**显示类**统计",
+  tip: "地形 = 覆盖(高 4 位) × 形态(低 4 位) × 气候；名字按**显示类**查表，管线定稿",
   title: "地形",
-  sub: "显示类 · 只读（覆盖 × 形态 × 气候）",
-  /* 色相由覆盖定、形态与气候只改名字——真正的配色是 data.js 那张有序规则表 */
+  sub: "显示类 · 只读（覆盖 × 形态 × 气候 的组合）",
+  /* 配色是 data.js 那张 display_classes（每类一色），这里只负责把字节+气候码查成颜色 */
   rgb: (byte, code) => toRgb(terColor(byte, code)),
-  bucketCount: () => DISPLAY_RULES.length + 1,          // 末桶 = 没落到任何规则（断言里不该有）
+  bucketCount: () => DISPLAY_CLASSES.length + 1,        // 末桶 = 查不到（data.js 旧版/被截断）
   bucket: (byte, code) => {
-    const i = displayIndexOf(byte >> 4, byte & 15, code >> 3, code & 7);
-    return i < 0 ? DISPLAY_RULES.length : i;
+    const i = displayIndexOf(byte, code);
+    return i < 0 ? DISPLAY_CLASSES.length : i;
   },
-  bucketLabel: i => i === DISPLAY_RULES.length
-    ? { n: "（未匹配：显示类规则表漏了）", c: "#cccccc" }
-    : { n: DISPLAY_RULES[i].n, c: DISPLAY_RULES[i].c },
+  /* 海洋格记进哪个桶：它也是**一类显示类**（占全图 68.3%），图例里必须有这一行 ——
+     否则鼠标悬在海上时页脚写着"显示类 海洋"，图例里却找不到它。
+     （气候层正好相反：海洋的气候码无意义，返回 -1。） */
+  oceanBucket: () => {
+    const i = displayIndexOf(0, 0);
+    return i < 0 ? DISPLAY_CLASSES.length : i;
+  },
+  bucketLabel: i => i === DISPLAY_CLASSES.length
+    ? { n: "（未匹配：display_lut 缺项）", c: "#cccccc" }
+    : { n: DISPLAY_CLASSES[i].n, c: DISPLAY_CLASSES[i].c },
   panel: s => roListPanel(TERRAIN, s),
-  note: s => `陆地 ${(s.land / 1e6).toFixed(2)}M 格（百分比以全图为分母）。名字是「覆盖 × 形态 ×
-    气候」当场算出来的**显示类**；底图里只存覆盖（高 4 位）与形态（低 4 位）——见
-    docs/adr/0006、0007。发现错格只能改管线的分类规则并重跑，编辑器改不了它。`,
-  legendNote: () => "覆盖 × 形态（显示类是覆盖 × 形态 × 气候派生出来的）",
+  note: s => `陆地 ${(s.land / 1e6).toFixed(2)}M 格。百分比以**全图**为分母，海洋也在内
+    （${(s.by.terrain[0] / s.cells * 100).toFixed(1)}% —— 它也是一类显示类）。名字是
+    「覆盖 × 形态 × 气候」当场查出来的**显示类**——那三样就是**地形**本身；底图里只存覆盖
+    （高 4 位）与形态（低 4 位），气候另存一张图（见 docs/adr/0006、0007）。发现错格只能改
+    管线的分类规则并重跑，编辑器改不了它。`,
+  legendNote: () => `<b>地形 = 覆盖 × 形态 × 气候 = 显示类</b>：一格一个名字、一格一个颜色`
+    + `（${DISPLAY_CLASSES.length} 类，任意两类色差 ΔE ≥ 9）。下面是实际出现的类，按格数排。`,
   insp: s => `
     <dl class="kv">
       <dt>状态</dt><dd><span class="pill">只读</span> 地形由管线定稿（docs/adr/0001）</dd>
-      <dt>编码</dt><dd>一个字节 = 覆盖（高 4 位）× 16 + 形态（低 4 位）</dd>
-      <dt>显示类</dt><dd>${DISPLAY_RULES.length} 条规则（覆盖 × 形态 × 气候，有序首命中）</dd>
+      <dt>编码</dt><dd>一个字节 = 覆盖（高 4 位）× 16 + 形态（低 4 位）；气候另存一张图</dd>
+      <dt>显示类</dt><dd>${DISPLAY_CLASSES.length} 类：名字由 tools/display_class.py 的按轴
+        词表算，编辑器按 <code>display_lut</code> 查表（1536 个组合全覆盖）<br>
+        <span class="mut" style="font-size:11px">${DISPLAY_ENCODING}</span></dd>
       <dt>改法</dt><dd class="mut" style="font-size:11px">编辑器改不了地形：它是 ETOPO 高程 ＋
         Copernicus 土地覆盖算出来的模拟底数，将来要做规则层「基础地形代价」的来源。
         发现错格只能改管线的分类规则（<code>tools/terrain.py</code>）并重跑生成。</dd>
     </dl>
-    <div class="sec-h">各覆盖占比（原始覆盖码，分母是全图）</div>
+    <div class="sec-h">各覆盖占比（**存储**口径：12 类，分母是全图）</div>
     <div class="bars">${COVER_NAMES.map((n, i) => bar(n, s.byCover[i] || 0, s.cells, coverColor(i))).join("")}</div>
     <div class="sec-h">各形态占比（分母是陆地——海洋格的形态位是 don't-care）</div>
     <div class="bars">${FORM_NAMES.map((n, i) => bar(n, s.byForm[i] || 0, s.land, "#c2ab7e")).join("")}</div>`,
@@ -178,7 +211,10 @@ const CLIMATE_LAYER = {
   /* 海洋格在气候视图里**仍画海洋色**——海洋的气候码无意义（见 build_raster 的注释） */
   rgb: (byte, code) => toRgb((byte >> 4) === 0 ? coverColor(0) : climateColor(code)),
   bucketCount: () => 32,
-  bucket: (byte, code) => code,
+  /* 海洋返回 -1：这一层里它的气候码无意义（恒 0），算进"寒带"是错的。地形层不一样 ——
+     那边「海洋」是个正经显示类，所以要算（见 buildRoStats 的说明）。 */
+  bucket: (byte, code) => ((byte | 0) >> 4) === 0 ? -1 : ((code | 0) & 31),
+  oceanBucket: () => -1,
   bucketLabel: code => {
     const h = code >> 3, m = code & 7;
     return { n: m === 0 ? "寒带" : `${CLIMATE.heat[h] || "?"}·${CLIMATE.moist[m] || "?"}`,
@@ -188,7 +224,8 @@ const CLIMATE_LAYER = {
   note: s => `陆地 ${(s.land / 1e6).toFixed(2)}M 格。码 = 热量带 × 8 + 干湿；**寒带不占热量带
     那一轴**——它是干湿的 0 码（所以读气候要先读干湿）。**B 组按纬度补过一刀**
     （BWh/BSh 在回归线外算亚热带）。见 docs/adr/0006。`,
-  legendNote: () => "热量带 × 干湿（码 = 热量带 × 8 + 干湿）",
+  legendNote: () => `热量带 × 干湿（码 = 热量带 × 8 + 干湿）。<b>寒带不占热量带那一轴</b>——`
+    + `它是干湿的 0 码，单独一行。`,
   insp: s => {
     const H = CLIMATE.heat || [], M = CLIMATE.moist || [];
     const heat = new Array(H.length).fill(0), moist = new Array(M.length).fill(0);
@@ -228,8 +265,8 @@ function climateGrid(layer, stats) {
       + ` style="background:${climateColor(code)};height:19px;border-radius:3px;text-align:center;`
       + `line-height:19px;font-size:9.5px;color:#3a3a3a">${pct(v, N) >= 0.04 ? pct(v, N).toFixed(1) + "%" : ""}</span>`;
   };
-  let html = `<div class="mut" style="padding:6px 9px 2px;font-size:10.5px">陆地 ${(stats.land / 1e6).toFixed(2)}M 格。
-     <b>寒带</b>不占热量带那一轴——它是干湿的「寒带」，单独一行。</div>`;
+  let html = `<div class="mut" style="padding:6px 9px 2px;font-size:10.5px">${layer.legendNote()}
+    陆地 ${(stats.land / 1e6).toFixed(2)}M 格。</div>`;
   html += `<div style="display:grid;grid-template-columns:46px 1fr;gap:2px;padding:6px 9px 2px">`
     + `<span class="mut" style="font-size:10px;line-height:19px">寒带</span>`
     + `<span title="寒带 ${(by[0] || 0).toLocaleString()} 格" style="background:${climateColor(0)};`

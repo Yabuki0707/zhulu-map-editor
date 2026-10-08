@@ -79,52 +79,49 @@ export const MODES = [{ k: "view", n: "视图" }, { k: "edit", n: "编辑" }];
 /* ---------------- 地形配色与图例（顺序即编码，由 js/data.js 给） ---------------- */
 export const COVER_NAMES = DATA.cover_legend;       // 覆盖 12 类
 export const FORM_NAMES = DATA.form_legend;         // 形态 4 类
-/* 12 个**覆盖**的基础色。图上真正的颜色还叠形态与气候（雨林/针叶林/沙漠/戈壁/高山草甸…），
-   由 data.js 的 display_classes 派生——色相由覆盖定、形态只调明暗，免得组合炸成一片糊。
-   改色只需改 tools/display_class.py 的那张表，这里跟着它走。 */
+/* 12 个**覆盖**的基础色：只当"覆盖族"的锚（图例里那 12 条占比、以及没有气候层时的兜底）。
+   图上真正的颜色是**显示类**的颜色，由 data.js 的 display_classes 给，一处也不在这里重复。
+   改色只需改 tools/display_class.py 的 PAINT，这里跟着它走。 */
 export const TER_COLORS = [
   "#7fa6c4", "#6ea8d8", "#5b8fc7", "#eef4f8",
   "#5b8a52", "#b9c68a", "#cdbb96", "#8fa98a", "#b0ab94", "#a8ad92", "#e8e4a8", "#86c06a",
 ];
 export const coverColor = c => TER_COLORS[c] || "#cccccc";
-/* 显示类：把「覆盖 × 形态 × 气候」叠起来看的名字与颜色。
-   表是有序的、`null` 通配，首命中生效；规则与配色同源于 tools/display_class.py。 */
-export const DISPLAY_RULES = DATA.display_classes || [];
+/* --------------------------------------------------------------------------
+   **显示类 = 覆盖 × 形态 × 气候 的组合 = 地形**（v4，2026-10-09 统一口径）。
+
+   `display_classes` 是 60 类以内的名字与颜色（`[{n, c}]`），`display_lut` 是**组合 → 类下标**
+   的查表：`((覆盖×4 + 形态) × 32) + 码`，码 = 热量带 × 8 + 干湿，**干湿为 0 时整条码归零**
+   （那 2 位是 don't-care）。1536 项覆盖全部组合，所以查表**永远命中**。
+
+   为什么不再用"有序规则表"：规则表要**扫**（940 万格的统计循环里就是 940 万次 × 31 条），
+   而且"被前面通配规则吃掉的具体规则"从代码上根本看不出来。名字现在是 Python 侧的
+   **按轴词表**（全函数），这里只是它的成品查表 —— 名字与配色的唯一出处是
+   `tools/display_class.py`，本文件与 ro.js 都不许再拼一份。
+   -------------------------------------------------------------------------- */
+export const DISPLAY_CLASSES = DATA.display_classes || [];
+export const DISPLAY_LUT = DATA.display_lut || [];
+export const DISPLAY_ENCODING = DATA.display_encoding || "";
 export const CLIMATE = DATA.climate_legend || { heat: [], moist: [], encoding: "" };
-export function displayIndexOf(cover, form, heat, moist) {
-  /* 命中的规则**下标**（找不到 → -1）。为什么要有这个版本：只读层的统计要的是"桶号"，
-     而每格现造一个对象（displayOf）在 940 万格的循环里就是 940 万个临时对象。
-     规则表有序、`null` 通配、首命中生效——与 tools/display_class.py 的 label() 同源。 */
-  for (let i = 0; i < DISPLAY_RULES.length; i++) {
-    const r = DISPLAY_RULES[i];
-    if (r.cover != null && r.cover !== cover) continue;
-    if (r.form != null && r.form !== form) continue;
-    if (r.heat != null && r.heat !== heat) continue;
-    if (r.moist != null && r.moist !== moist) continue;
-    return i;
-  }
-  return -1;
+/* 一格 → 类下标（-1 = 查不到，只可能因为 data.js 是旧版或被截断；`bucketLabel` 会显示成灰行）。
+   ⚠️ 参数是**地形字节 + 气候码**，不是四个轴：调用点手上本来就是这两样（state.terr / climData）。 */
+export function displayIndexOf(byte, code) {
+  const c = (byte | 0) >> 4, f = (byte | 0) & 15, k = (code | 0) & 31;
+  return DISPLAY_LUT[((c << 2) | f) * 32 + ((k & 7) === 0 ? 0 : k)] ?? -1;
 }
-export function displayOf(cover, form, heat, moist) {
-  const i = displayIndexOf(cover, form, heat, moist);
-  return i < 0 ? null : DISPLAY_RULES[i];
-}
-/* 显示类名字（查不到就退回"覆盖 · 形态"，绝不返回 undefined） */
-export function displayName(cover, form, heat, moist) {
-  const r = displayOf(cover, form, heat, moist);
-  if (r) return r.n;
-  return `${COVER_NAMES[cover] || "覆盖" + cover}${form ? "·" + (FORM_NAMES[form] || form) : ""}`;
+export function displayOf(byte, code) {
+  const i = displayIndexOf(byte, code);
+  return i < 0 ? null : DISPLAY_CLASSES[i];
 }
 export const terColor = (byte, kl) => {
   /* byte 是地形那个字节；kl = 该格的气候码（热量带×8+干湿），可选。
-     给了气候就按「覆盖 × 形态 × 气候」派生色（森林因此分出雨林/针叶林…）；
-     不给（图例、兜底路径）就用覆盖的基础色。 */
-  const c = (byte | 0) >> 4, f = (byte | 0) & 15;
-  if (kl != null && DISPLAY_RULES.length) {
-    const r = displayOf(c, f, kl >> 3, kl & 7);
+     给了气候就是**显示类**的颜色（森林因此分出雨林/针叶林…）；
+     不给（覆盖占比条、兜底路径）就用覆盖的基础色。 */
+  if (kl != null && DISPLAY_LUT.length) {
+    const r = displayOf(byte, kl);
     if (r && r.c) return r.c;
   }
-  return coverColor(c);
+  return coverColor((byte | 0) >> 4);
 };
 /* ---- 气候层着色：热量带定色相、干湿定浓淡（干=浅、湿=深）----
    寒带（干湿码 0）单独一色：它跟热量带无关，是"极地"这件事本身。
