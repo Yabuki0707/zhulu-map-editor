@@ -5,7 +5,7 @@
    参考层不在这里：它是**矢量顶点**（js/refvec.js），不再烧成栅格掩膜，也不再有金字塔。
    ========================================================================== */
 
-import { DATA, W, H, NC, TER_NAMES, terColor, toRgb, TER_THIN } from "./config.js";
+import { DATA, W, H, NC, terColor, toRgb, TER_THIN } from "./config.js";
 
 /* ---------------- 图层画布（各一张，尺寸 = 栅格） ---------------- */
 export function makeCanvas(w, h) {
@@ -88,10 +88,17 @@ export async function decodeAll() {
      缺它也不崩：显示色退回基础色（森林只有一种绿），其余功能不受影响。 */
   if (ci) c.drawImage(ci, 0, 0, W, H);
   const d4 = ci ? c.getImageData(0, 0, W, H).data : null;
+  /* 分区编码.png 存的是**地块内的局部序号**（v3），而编辑器内部一律用**全局块区 id**
+     （state.blocks 的键、导出、存档全是它）。这里当场换算一次，别的模块一行都不用改。
+     键 = plot×256 + local；地块 ≤ 8191（13 位），所以表要开 (maxPlot+1)×256 那么长。 */
+  let maxPlot = 0;
+  for (const b of (DATA.districts || [])) if (b.plot > maxPlot) maxPlot = b.plot;
+  const l2g = new Uint16Array((maxPlot + 1) * 256);
+  for (const b of (DATA.districts || [])) l2g[(b.plot << 8) | b.local] = b.id;
   for (let i = 0, j = 0; i < NC; i++, j += 4) {
     plotData[i] = d1[j] | (d1[j + 1] << 8);
     terrData[i] = d2[j];
-    if (d3) distData[i] = d3[j] | (d3[j + 1] << 8);
+    if (d3) distData[i] = d3[j] ? l2g[(plotData[i] << 8) | d3[j]] : 0;
     if (d4) climData[i] = d4[j] & 31;
   }
   for (const ctx of [idCtx, distIdCtx, terRawCtx]) ctx.imageSmoothingEnabled = false;
@@ -161,7 +168,8 @@ export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
     const nw = Math.max(1, cw >> 1), nh = Math.max(1, ch >> 1), nd = new Uint8Array(nw * nh);
     const ndc = new Uint8Array(nw * nh);         // 同级的**气候码**降采样，供派生显示色
     const need = l <= thinLevels ? 1 : 2;
-    const cnt = new Uint8Array(TER_NAMES.length);
+    const cnt = new Uint8Array(256);            // 地形字节 0..196，按**字节**数
+
     const cntC = new Uint8Array(32);
     for (let y = 0; y < nh; y++) {
       const r0 = 2 * y * cw, r1 = Math.min(2 * y + 1, ch - 1) * cw;
@@ -169,12 +177,18 @@ export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
         const x0 = 2 * x, x1 = Math.min(2 * x + 1, cw - 1);
         const a = cur[r0 + x0], b = cur[r0 + x1], c = cur[r1 + x0], d = cur[r1 + x1];
         let thin = -1, nThin = 0;
+        // ⚠️ TER_THIN 是**覆盖码**（v3），比的是字节的高 4 位；直接 `a === t` 会比不中，
+        // 缩小时 1 格宽的河就整片消失（那正是当初做金字塔要解决的问题）。
+        const cv = v => v >> 4;
         for (const t of TER_THIN) {                // TER_THIN 已按优先级排好
-          if (a === t || b === t || c === t || d === t) { if (thin < 0) thin = t; nThin++; }
+          if (cv(a) === t || cv(b) === t || cv(c) === t || cv(d) === t) {
+            if (thin < 0) thin = t; nThin++;
+          }
         }
         let pick;
-        if (thin >= 0 && nThin >= need) pick = thin;
-        else {
+        if (thin >= 0 && nThin >= need) {
+          for (const v of [a, b, c, d]) if (cv(v) === thin) { pick = v; break; }
+        } else {
           cnt[a]++; cnt[b]++; cnt[c]++; cnt[d]++;
           let best = a, bn = 0;
           for (let i = 0; i < cnt.length; i++) if (cnt[i] > bn) { bn = cnt[i]; best = i; }

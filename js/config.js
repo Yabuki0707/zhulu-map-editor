@@ -18,12 +18,17 @@ export const LS_HELP = LS_PREFIX + "help.v3";
 
 /* 笔刷半径（格）：1 = 单格；上限 50（默认格 0.0625° × 50 ≈ 347 km） */
 export const R_MIN = 1, R_MAX = 50, R_DEF = 4;      // R_DEF = 启动默认半径（index.html 的初始 SVG 也标 4）
-export const T_OCEAN = 0;                            // 地形「海洋」编码 —— 海陆口径的唯一判据
-export const T_PLAIN = 9;                            // 地形「平原」编码（与 tools/terrain.py 的 LEGEND 对齐）
-/* 细线类（河、湖、冰川）：降采样时必须保住，否则缩到全图整条消失。
-   顺序即优先级 —— 河最重要，冰最次。地形层金字塔与笔刷的海陆拦截都要用。 */
-export const T_LAKE = 1, T_RIVER = 2, T_ICE = 3;
-export const TER_THIN = [T_RIVER, T_LAKE, T_ICE];
+/* ---- 地形字节（v3）：**一个字节 = 覆盖(高 4 位) × 16 + 形态(低 4 位)** ----
+   覆盖 12 类：0海洋 1湖泊 2河流 3冰川 4森林 5草原 6荒漠 7沼泽 8滩涂 9盐沼 10农田 11绿洲
+   形态 5 类：0无（水冰格）1平原 2丘陵 3高原 4山地
+   打解包在 tools/terrain.py 的 pack()/unpack()；契约见 docs/adr/0007。 */
+export const T_OCEAN = 0;             // 覆盖 0 ∧ 形态 0 —— **海洋恰好是字节 0**，判海陆仍只看它
+export const T_PLAIN = (5 << 4) | 1;  // 「草原∧平原」的一个合法字节，只作"当前对象"占位
+/* ⚠️ 下面四个是**覆盖码**，不是字节。要比对必须先 `字节 >> 4`（见 raster.js 的 TER_THIN 用法）。
+   细线类（河、湖、冰川）降采样时必须保住，否则缩到全图整条消失；顺序即优先级。 */
+export const C_OCEAN = 0, C_LAKE = 1, C_RIVER = 2, C_ICE = 3;
+export const T_LAKE = C_LAKE, T_RIVER = C_RIVER, T_ICE = C_ICE;
+export const TER_THIN = [C_RIVER, C_LAKE, C_ICE];
 
 
 /* --------------------------------------------------------------------------
@@ -53,42 +58,47 @@ export const EDIT_UNITS = UNITS.filter(u => !u.viewOnly);
 
 export const MODES = [{ k: "view", n: "视图" }, { k: "edit", n: "编辑" }];
 
-/* ---------------- 地形配色与图例（图例顺序即编码，由 js/data.js 给） ---------------- */
-export const TER_NAMES = DATA.terrain_legend;
-/* 14 类地形的**基础**配色：编码次序见 tools/terrain.py 的 LEGEND（v2 契约，ADR 0006）
-   0 海洋 1 湖泊 2 河流 3 冰川 | 4 森林 5 草原 6 荒漠 7 沼泽 8 滩涂 9 绿洲 | 10 平原 11 丘陵 12 高原 13 山地
-   森林那一格是"没有气候信息时的底色"；图上真正的四种绿由 `DATA.display_classes`
-   按「森林 × 热量带」当场派生出（雨林/常绿阔叶/落叶阔叶/针叶），见 js/render.js。
+/* ---------------- 地形配色与图例（顺序即编码，由 js/data.js 给） ---------------- */
+export const COVER_NAMES = DATA.cover_legend;       // 覆盖 12 类
+export const FORM_NAMES = DATA.form_legend;         // 形态 5 类
+/* 12 个**覆盖**的基础色。图上真正的颜色还叠形态与气候（雨林/针叶林/沙漠/戈壁/河谷农田…），
+   由 data.js 的 display_classes 派生——色相由覆盖定、形态只调明暗，免得组合炸成一片糊。
    改色只需改 tools/display_class.py 的那张表，这里跟着它走。 */
 export const TER_COLORS = [
   "#7fa6c4", "#6ea8d8", "#5b8fc7", "#eef4f8",
-  "#4f7a4a", "#b9c68a", "#cdbb96", "#8fa98a", "#b0ab94", "#86c06a",
-  "#cfe0a8", "#c8b98f", "#c2ab7e", "#a98a62",
+  "#5b8a52", "#b9c68a", "#cdbb96", "#8fa98a", "#b0ab94", "#a8ad92", "#e8e4a8", "#86c06a",
 ];
-export const terColor = (t, kl) => {
-  /* kl = 该格的气候码（热量带×8+干湿），可选。给了就按「覆盖 × 气候」派生色
-     （森林因此分出雨林/常绿阔叶/落叶阔叶/针叶四种绿，见 data.js 的 display_classes）；
-     不给（图例、兜底路径）就用基础色。 */
-  if (kl != null && DISPLAY_RULES.length) {
-    const r = displayOf(t, kl >> 3, kl & 7);
-    if (r && r.c) return r.c;
-  }
-  return TER_COLORS[t] || "#cccccc";
-};
-export const terName = t => TER_NAMES[t] || `地形 ${t}`;
-/* 显示类：把「地形（覆盖）× 气候（热量带×干湿）」叠起来看的名字与颜色。
+export const coverColor = c => TER_COLORS[c] || "#cccccc";
+/* 显示类：把「覆盖 × 形态 × 气候」叠起来看的名字与颜色。
    表是有序的、`null` 通配，首命中生效；规则与配色同源于 tools/display_class.py。 */
 export const DISPLAY_RULES = DATA.display_classes || [];
 export const CLIMATE = DATA.climate_legend || { heat: [], moist: [], encoding: "" };
-export function displayOf(ter, heat, moist) {
+export function displayOf(cover, form, heat, moist) {
   for (const r of DISPLAY_RULES) {
-    if (r.cover !== ter) continue;
+    if (r.cover != null && r.cover !== cover) continue;
+    if (r.form != null && r.form !== form) continue;
     if (r.heat != null && r.heat !== heat) continue;
     if (r.moist != null && r.moist !== moist) continue;
     return r;
   }
   return null;
 }
+export const terColor = (byte, kl) => {
+  /* byte 是地形那个字节；kl = 该格的气候码（热量带×8+干湿），可选。
+     给了气候就按「覆盖 × 形态 × 气候」派生色（森林因此分出雨林/针叶林…）；
+     不给（图例、兜底路径）就用覆盖的基础色。 */
+  const c = (byte | 0) >> 4, f = (byte | 0) & 15;
+  if (kl != null && DISPLAY_RULES.length) {
+    const r = displayOf(c, f, kl >> 3, kl & 7);
+    if (r && r.c) return r.c;
+  }
+  return coverColor(c);
+};
+export const terName = byte => {
+  const c = (byte | 0) >> 4, f = (byte | 0) & 15;
+  const cn = COVER_NAMES[c] || `覆盖 ${c}`;
+  return f ? `${cn}·${FORM_NAMES[f] || f}` : cn;
+};
 
 
 

@@ -4,8 +4,9 @@
    编辑模式下选中的对象就是笔刷对象。
    ========================================================================== */
 
-import { DATA, G, W, NC, DOM, COLOR, UNASSIGNED, TER_NAMES, terColor, terName,
+import { DATA, G, W, NC, DOM, COLOR, UNASSIGNED, terColor, terName,
          UNIT, R_MIN, R_MAX, R_DEF, LAY_KEY, LS_HELP, T_PLAIN, T_OCEAN, blockColor, rowLat,
+         COVER_NAMES, FORM_NAMES, coverColor, displayOf, CLIMATE,
          isEditable } from "./config.js";
 import { BASE, idCanvas, distIdCanvas, terRawCanvas, flushAll } from "./raster.js";
 import { loadRef, REF } from "./refvec.js";
@@ -269,7 +270,7 @@ function leftSubText() {
   if (leftKind === "domain") return `${DOM.length} 域 · 已指派 ${(domCells.reduce((a, b) => a + b, 0) / 1e6).toFixed(2)}M 格`;
   if (leftKind === "plot") return `${Object.keys(state.plots).length} 块 · ${(cellsWithPlot / 1e6).toFixed(2)}M 格`;
   if (leftKind === "block") return `${Object.keys(state.blocks).length} 个 · ${(cellsWithBlock / 1e6).toFixed(2)}M 格`;
-  return `${TER_NAMES.length} 类 · 只读`;
+  return `${COVER_NAMES.length} 覆盖 × ${FORM_NAMES.length} 形态 · 只读`;
 }
 function syncLeftSel() {
   const cur = state.sel[leftKind];
@@ -364,14 +365,20 @@ function renderBlockPanel() {
 /* — 地形（只读；docs/adr/0001）— */
 function renderTerrainPanel() {
   leftTitle.textContent = "地形";
-  leftSub.textContent = "图例 · 只读（管线定稿）";
-  const h = terrainHistogram();
-  leftBody.innerHTML = TER_NAMES.map((n, i) =>
+  leftSub.textContent = "覆盖 × 形态 · 只读（管线定稿）";
+  const h = terrainHistogram(), hf = formHistogram();
+  leftBody.innerHTML = COVER_NAMES.map((n, i) =>
       `<div class="row lv0" style="cursor:default">`
-      + `<span class="sw" style="background:${terColor(i)}"></span><span class="nm">${esc(n)}</span>`
+      + `<span class="sw" style="background:${coverColor(i)}"></span><span class="nm">${esc(n)}</span>`
       + `<span class="n">${((h[i] || 0) / NC * 100).toFixed(2)}%</span></div>`).join("")
-    + `<div class="mut" style="padding:6px 9px;font-size:10.5px">地形由管线从 ETOPO 高程与
-       Copernicus 土地覆盖算出，编辑器只读。要改地形得改管线的分类规则并重跑生成。</div>`;
+    + `<div class="sec-h">形态（覆盖之下的一轴）</div>`
+    + FORM_NAMES.map((n, i) =>
+        `<div class="row lv0" style="cursor:default"><span class="nm">${esc(n)}</span>`
+        + `<span class="n">${((hf[i] || 0) / NC * 100).toFixed(2)}%</span></div>`).join("")
+    + `<div class="mut" style="padding:6px 9px;font-size:10.5px">地形字节 = 覆盖(高 4 位) × 16 +
+       形态(低 4 位)，由管线从 ETOPO 高程、起伏与 Copernicus 土地覆盖算出，编辑器只读。
+       图上的名字（雨林/针叶林/沙漠/戈壁/河谷农田…）是「覆盖 × 形态 × 气候」当场派生的显示类，
+       见 docs/adr/0006、0007。</div>`;
 }
 function afterPanelRender() {
   rowRefs = new Map();
@@ -586,10 +593,20 @@ let terrHist = null, terrHistAt = 0;
 function terrainHistogram() {
   const now = Date.now();
   if (terrHist && now - terrHistAt < 400) return terrHist;
-  const h = new Int32Array(TER_NAMES.length);
+  const h = new Int32Array(COVER_NAMES.length);
   const t = state.terr;
-  for (let i = 0; i < NC; i++) { const v = t[i]; if (v < h.length) h[v]++; }
+  for (let i = 0; i < NC; i++) { const c = t[i] >> 4; if (c < h.length) h[c]++; }
   terrHist = h; terrHistAt = now;
+  return h;
+}
+let formHist = null, formHistAt = 0;
+function formHistogram() {
+  const now = Date.now();
+  if (formHist && now - formHistAt < 400) return formHist;
+  const h = new Int32Array(FORM_NAMES.length);
+  const t = state.terr;
+  for (let i = 0; i < NC; i++) { const f = t[i] & 15; if (f < h.length) h[f]++; }
+  formHist = h; formHistAt = now;
   return h;
 }
 function inspTerrain() {
@@ -601,11 +618,11 @@ function inspTerrain() {
         Copernicus 土地覆盖算出来的模拟底数，将来要做规则层的「基础地形代价」来源。
         发现错格只能改管线的分类规则（<code>tools/terrain.py</code> 的常量）并重跑生成。</dd>
     </dl>
-    <div class="sec-h">各地形占比（只读）</div>
-    <div class="bars">` + TER_NAMES.map((n, i) => {
+    <div class="sec-h">各覆盖占比（只读）</div>
+    <div class="bars">` + COVER_NAMES.map((n, i) => {
       const v = h[i] || 0, pct = (v / NC * 100);
       return `<div class="bar">`
-        + `<i style="background:${terColor(i)}"></i><span>${esc(n)}</span>`
+        + `<i style="background:${coverColor(i)}"></i><span>${esc(n)}</span>`
         + `<span class="v">${pct >= 0.01 ? pct.toFixed(2) + "%" : "—"}</span></div>`;
     }).join("") + `</div>`;
 }
@@ -774,11 +791,50 @@ function editorLedger() {
     const p = state.plots[id];
     return { id, name: p.n || "", domain: (p.d >= 0 && DOM[p.d]) ? DOM[p.d].d : "" };
   });
+  const g2l = blockLocals();
   const districts = Object.keys(state.blocks).map(Number).sort((a, b) => a - b).map(id => {
     const b = state.blocks[id];
-    return { id, name: b.n || "", plot: b.p || 0 };
+    return { id, name: b.n || "", plot: b.p || 0, local: g2l.get(id) || 0 };
   });
   return { based_on: DATA.base_tag, saved_at: new Date().toISOString(), plots, districts };
+}
+
+/* 全局块区 id → **地块内的局部序号**（v3，见 docs/adr/0007）。
+   先取真源发好的号；编辑器**新建**的块（真源里没有）在同一地块内接着往下发，
+   否则它们导出时会被写成 0 —— 也就是"新建的块区一存就没了"。
+   局部序号是"地块内的第几个"，栅格只存它；全局 id 仍是编辑器的内部语言。 */
+export function blockLocals() {
+  const g2l = new Map(), next = new Map();
+  for (const b of (DATA.districts || [])) {
+    g2l.set(b.id, b.local);
+    next.set(b.plot, Math.max(next.get(b.plot) || 0, b.local));
+  }
+  for (const id of Object.keys(state.blocks).map(Number).sort((a, b) => a - b)) {
+    if (g2l.has(id)) continue;
+    const plot = (state.blocks[id] && state.blocks[id].p) || 0;
+    if (!plot) continue;                       // 未挂地块的块区不写进栅格（渲染成灰）
+    const l = (next.get(plot) || 0) + 1;
+    next.set(plot, l);
+    g2l.set(id, l);
+  }
+  return g2l;
+}
+
+/* 导出分区编码：栅格存的是**地块内的局部序号**（v3），而编辑器内部用**全局 id**。
+   这里按台账的 (plot, local) 折回去——导入端（tools/import_editor.py）拿到局部序号后
+   用同一张表还原，因此"块区必落在其地块内"这条仍然成立。 */
+function distLocalPng() {
+  const g2l = blockLocals();
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const c = cv.getContext("2d");
+  const im = c.createImageData(W, H), d = im.data;
+  for (let i = 0, j = 0; i < NC; i++, j += 4) {
+    const v = g2l.get(state.dist[i]) || 0;
+    d[j] = d[j + 1] = d[j + 2] = v; d[j + 3] = 255;
+  }
+  c.putImageData(im, 0, 0);
+  return cv.toDataURL("image/png");
 }
 
 export async function saveToStaging() {
@@ -789,7 +845,7 @@ export async function saveToStaging() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ base_tag: DATA.base_tag, files: {
         "地块编码.png": idCanvas.toDataURL("image/png"),
-        "分区编码.png": distIdCanvas.toDataURL("image/png"),
+        "分区编码.png": distLocalPng(),
         "台账.json": editorLedger(),
       } }),
     });
@@ -855,7 +911,7 @@ function bindExports() {
   $("save").onclick = () => { saveNow(setSaved); closeMenu(); };
   $("stage").onclick = () => { saveToStaging(); };
   $("expPng").onclick = () => { flushAll(); download(`地块编码-${today()}.png`, idCanvas.toDataURL("image/png")); closeMenu(); };
-  $("expDis").onclick = () => { flushAll(); download(`块区编码-${today()}.png`, distIdCanvas.toDataURL("image/png")); closeMenu(); };
+  $("expDis").onclick = () => { flushAll(); download(`块区编码-${today()}.png`, distLocalPng()); closeMenu(); };
   /* 「导出地形 PNG」已按 docs/adr/0001 去掉：地形图是管线定稿，编辑器不产出它 */
   $("expLed").onclick = () => {
     const pc = getPlotCells(), rows = [["id", "名称", "地缘", "地域", "像元数", "估面积km²"]];
@@ -1151,7 +1207,7 @@ function stepObject(d) {
   const list = u === "domain" ? DOM.map((x, i) => i)
     : u === "plot" ? Object.keys(state.plots).map(Number).sort((a, b) => a - b)
     : u === "block" ? Object.keys(state.blocks).map(Number).sort((a, b) => a - b)
-    : TER_NAMES.map((x, i) => i);
+    : COVER_NAMES.map((x, i) => i);
   if (!list.length) return;
   const cur = list.indexOf(state.sel[u]);
   const nxt = list[((cur < 0 ? (d > 0 ? -1 : 0) : cur) + d + list.length) % list.length];
