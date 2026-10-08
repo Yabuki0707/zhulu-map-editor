@@ -6,10 +6,10 @@ import { DATA, W, H, NC, DOM, GEO_INDEX, COLOR, UNASSIGNED, toRgb,
          plotColorFallback, PLOT_PALETTE, blockColor,
          ALPHA_ASSIGNED, ALPHA_FREE, ALPHA_PLOTMODE, ALPHA_BLOCK,
          LS_KEY, LS_PREFIX, LS_HELP, LAY_KEY, T_PLAIN,
-         R_DEF, terColor } from "./config.js";
+         R_DEF } from "./config.js";
 import { plotData, terrData, distData, climData, plotImg, terImg, distImg,
          idImg, distIdImg, terRawImg, plotCtx, terCtx, distCtx, idCtx, distIdCtx, terRawCtx,
-         flushAll, putBox, BASE, EDGE_COLORS } from "./raster.js";
+         flushAll, putBox, BASE, EDGE_COLORS, roColor } from "./raster.js";
 
 /* ---------------- 状态 ---------------- */
 export const state = {
@@ -104,7 +104,7 @@ export function writeAll(i) {
   const j = i * 4, id = state.plot[i], t = state.terr[i], b = state.dist[i];
   const col = plotRgbOf(id), pd = plotImg.data;
   pd[j] = col[0]; pd[j + 1] = col[1]; pd[j + 2] = col[2]; pd[j + 3] = plotAlpha(id);
-  const tc = toRgb(terColor(t, climData[i])), td = terImg.data;
+  const tc = roColor(t, climData[i]), td = terImg.data;
   td[j] = tc[0]; td[j + 1] = tc[1]; td[j + 2] = tc[2]; td[j + 3] = 255;
   const bc = blockRgbOf(b), bd = distImg.data;
   bd[j] = bc[0]; bd[j + 1] = bc[1]; bd[j + 2] = bc[2]; bd[j + 3] = b ? ALPHA_BLOCK : 0;
@@ -115,6 +115,15 @@ export function writeAll(i) {
   const trd = terRawImg.data; trd[j] = trd[j + 1] = trd[j + 2] = t; trd[j + 3] = 255;
 }
 export const writeCell = writeAll;
+
+/* 只重画地形那一层（切换 地形/气候 只读视图时用；不碰地块/块区，省掉秒级的全量重画） */
+export function repaintTerrain() {
+  for (let i = 0, j = 0; i < NC; i++, j += 4) {
+    const tc = roColor(state.terr[i], climData[i]), td = terImg.data;
+    td[j] = tc[0]; td[j + 1] = tc[1]; td[j + 2] = tc[2]; td[j + 3] = 255;
+  }
+  terCtx.putImageData(terImg, 0, 0);
+}
 
 export function repaintAll() {
   for (let i = 0; i < NC; i++) writeAll(i);

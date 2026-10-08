@@ -5,7 +5,8 @@
    参考层不在这里：它是**矢量顶点**（js/refvec.js），不再烧成栅格掩膜，也不再有金字塔。
    ========================================================================== */
 
-import { DATA, W, H, NC, terColor, toRgb, TER_THIN } from "./config.js";
+import { DATA, W, H, NC, terColor, toRgb, TER_THIN, RO_VIEW, climateColor,
+         coverColor } from "./config.js";
 
 /* ---------------- 图层画布（各一张，尺寸 = 栅格） ---------------- */
 export function makeCanvas(w, h) {
@@ -211,21 +212,30 @@ export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
   TER_MIPS = levels;
   return levels;
 }
-/* 金字塔某级 → 上色画布（按级缓存；地形不变，所以缓存永不失效） */
-const terMipCanvases = new WeakMap();
+/* 金字塔某级 → 上色画布。**按"级 × 只读预览模式"缓存**（地形层不变，缓存不必失效，
+   只有切换 地形/气候 视图时才换一份——见 config.js 的 RO_VIEW）。 */
+const terMipCanvases = new WeakMap();          // level → {terrain?: canvas, climate?: canvas}
+export function roColor(byte, code) {
+  /* 只读自然层的取色：气候视图下海洋仍画海洋色（海洋的气候码无意义）。 */
+  if (RO_VIEW === "climate") {
+    return toRgb((byte >> 4) === 0 ? coverColor(0) : climateColor(code));
+  }
+  return toRgb(terColor(byte, code));
+}
 export function terMipCanvas(level) {
-  let cv = terMipCanvases.get(level);
-  if (cv) return cv;
-  cv = makeCanvas(level.w, level.h);
+  let slot = terMipCanvases.get(level);
+  if (!slot) { slot = {}; terMipCanvases.set(level, slot); }
+  if (slot[RO_VIEW]) return slot[RO_VIEW];
+  const cv = makeCanvas(level.w, level.h);
   const c = cv.getContext("2d");
   const im = c.createImageData(level.w, level.h), d = im.data, s = level.data;
   const sc = level.clim;
   for (let i = 0, j = 0; i < s.length; i++, j += 4) {
-    const rgb = toRgb(terColor(s[i], sc ? sc[i] : null));
+    const rgb = roColor(s[i], sc ? sc[i] : 0);
     d[j] = rgb[0]; d[j + 1] = rgb[1]; d[j + 2] = rgb[2]; d[j + 3] = 255;
   }
   c.putImageData(im, 0, 0);
-  terMipCanvases.set(level, cv);
+  slot[RO_VIEW] = cv;
   return cv;
 }
 

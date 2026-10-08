@@ -32,7 +32,15 @@ export const TER_THIN = [C_RIVER, C_LAKE, C_ICE];
 
 
 /* --------------------------------------------------------------------------
-   四个单元。视图层与编辑层共用同一组对象，但**地形是只读的**（docs/adr/0001）：
+   **五个单元，分两组**（2026-10-09 重构）：
+     行政（可编辑）地域 / 地块 / 块区  ‖  自然（只读）地形 / 气候
+   自然层是**产品层**、管线定稿，编辑器只能看（docs/adr/0001、0006、0007）：
+   地形 = 覆盖 × 形态 两个半字节；气候 = 热量带 × 干湿 一个字节。
+   （地理区层还没建，建好后照气候这同一套挂进来即可。）
+
+   旧版把"地形"当第四个单元混在行政里，气候根本没有入口——那已经不适配现在的模型了。
+
+   视图层与编辑层共用同一组对象，但**自然层是只读的**（docs/adr/0001）：
    地形图由管线从 ETOPO 高程 + Copernicus LC100 土地覆盖算出，将来还要当规则层
    "基础地形代价"的来源 —— 让人用笔刷随手改模拟底数，一笔划过就会静默改掉行军耗时。
    于是地形只在**视图模式**里作为图例与占比出现；编辑模式里没有这个单元。
@@ -42,11 +50,16 @@ export const TER_THIN = [C_RIVER, C_LAKE, C_ICE];
      viewOnly —— true = 只读单元，编辑模式下不出现、没有笔刷
    -------------------------------------------------------------------------- */
 export const UNITS = [
-  { k: "domain",  n: "地域", layer: "plot",    obj: "地块",       tip: "点/拖：给光标下的地块指派地域" },
-  { k: "plot",    n: "地块", layer: "plot",    obj: "栅格",       tip: "点/拖：把地块编码写进栅格" },
-  { k: "block",   n: "块区", layer: "dist",    obj: "地块内的栅格", tip: "点/拖：在所属地块的范围内画块区" },
-  { k: "terrain", n: "地形", layer: "terrain", obj: "（只读）",    tip: "地形由管线定稿，编辑器只读：这里只作图例与占比",
-    viewOnly: true },
+  { k: "domain",  n: "地域", layer: "plot",    obj: "地块",       tip: "点/拖：给光标下的地块指派地域",
+    group: "行政" },
+  { k: "plot",    n: "地块", layer: "plot",    obj: "栅格",       tip: "点/拖：把地块编码写进栅格",
+    group: "行政" },
+  { k: "block",   n: "块区", layer: "dist",    obj: "地块内的栅格", tip: "点/拖：在所属地块的范围内画块区",
+    group: "行政" },
+  { k: "terrain", n: "地形", layer: "terrain", obj: "（只读）",    group: "自然", viewOnly: true,
+    tip: "地形 = 覆盖(高 4 位) × 形态(低 4 位)，管线定稿；这里按**显示类**统计" },
+  { k: "climate", n: "气候", layer: "climate", obj: "（只读）",    group: "自然", viewOnly: true,
+    tip: "气候 = 热量带 × 干湿，管线定稿（柯本）；这里看两轴交叉与占比" },
 ];
 export const UNIT = {};
 for (const u of UNITS) UNIT[u.k] = u;
@@ -94,6 +107,22 @@ export const terColor = (byte, kl) => {
   }
   return coverColor(c);
 };
+/* ---- 气候层着色：热量带定色相、干湿定浓淡（干=浅、湿=深）----
+   寒带（干湿码 0）单独一色：它跟热量带无关，是"极地"这件事本身。
+   海洋格在气候视图里**仍然画海洋色**——海洋的气候码无意义（见 build_raster 的注释）。 */
+const HEAT_HUE = [22, 62, 100, 196];                    // 热带 → 亚寒带
+const MOIST_S = [0, 26, 33, 42, 49, 55, 60, 66];
+const MOIST_L = [78, 76, 72, 67, 62, 57, 53, 48];
+export const climateColor = code => {
+  const h = (code | 0) >> 3, m = (code | 0) & 7;
+  if (m === 0) return "#c9d5dd";                        // 寒带（也吸收"无气候数据"）
+  return `hsl(${HEAT_HUE[h] ?? 100} ${MOIST_S[m]}% ${MOIST_L[m]}%)`;
+};
+/* 只读自然层的**当前预览对象**（"terrain" | "climate"）。放在这里是因为
+   raster.js 与 state.js 都要读它，而 state→raster 有依赖，不能让 raster 反向 import。 */
+export let RO_VIEW = "terrain";
+export const setRoView = v => { RO_VIEW = v === "climate" ? "climate" : "terrain"; };
+
 export const terName = byte => {
   const c = (byte | 0) >> 4, f = (byte | 0) & 15;
   const cn = COVER_NAMES[c] || `覆盖 ${c}`;

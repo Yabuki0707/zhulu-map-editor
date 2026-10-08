@@ -7,15 +7,11 @@
 import { DATA, G, W, NC, DOM, COLOR, UNASSIGNED, terColor, terName,
          UNIT, R_MIN, R_MAX, R_DEF, LAY_KEY, LS_HELP, T_PLAIN, T_OCEAN, blockColor, rowLat,
          COVER_NAMES, FORM_NAMES, coverColor, displayOf, CLIMATE,
+         climateColor, setRoView, RO_VIEW, DISPLAY_RULES,
          isEditable } from "./config.js";
-import { BASE, idCanvas, distIdCanvas, terRawCanvas, flushAll } from "./raster.js";
+import { BASE, idCanvas, distIdCanvas, terRawCanvas, flushAll, climData } from "./raster.js";
 import { loadRef, REF } from "./refvec.js";
-import { state, recount, getCellsOf, getPlotCells, getCellsOfBlock, getBlockCells,
-         repaintAll, repaintPlotLayer, newPlot, newBlock, componentsOf, splitComponent, scanParts,
-         setPlotDomain, setPlotName, setBlockOwner, setBlockName, undo, redo,
-         saveNow, autosave, snapshot, applySnapshot, seedPlots, clearSave, dropMeta, ID_MAX,
-         domCells, cellsWithPlot, cellsWithBlock, blockStrays, touched, beginGesture,
-         writeAll } from "./state.js";
+import { state, recount, getCellsOf, getPlotCells, getCellsOfBlock, getBlockCells, repaintAll, repaintPlotLayer, newPlot, newBlock, componentsOf, splitComponent, scanParts, setPlotDomain, setPlotName, setBlockOwner, setBlockName, undo, redo, saveNow, autosave, snapshot, applySnapshot, seedPlots, clearSave, dropMeta, ID_MAX, domCells, cellsWithPlot, cellsWithBlock, blockStrays, touched, beginGesture, writeAll, repaintTerrain } from "./state.js";
 import { cv, resize, fit, FIT, schedule, markOverlayDirty, setSpace, setCursorText,
          viewSize, toCell, centerOn, anchorCell, buildEdgesNow, dropOutlineCache,
          markEdgesDirty, dropRefPathCache } from "./render.js";
@@ -67,10 +63,15 @@ export function setMode(m, silent) {
 export function setUnit(u) {
   if (!UNIT[u]) return;
   if (!isEditable(u) && state.mode === "edit") {
-    if (u === "terrain") toast("地形只读：地形图由管线从高程与土地覆盖算出，编辑器不能改（视图模式里看图例与占比）", 3200);
+    if (u === "terrain") toast("地形只读：由管线从高程、起伏与土地覆盖算出，编辑器不能改（视图模式里看显示类统计）", 3200);
+    else if (u === "climate") toast("气候只读：由管线从柯本气候分类算出，编辑器不能改（视图模式里看两轴交叉与占比）", 3600);
     return;
   }
   state.unit = u;
+  /* 只读自然层：把底图着色切到它（地形 = 覆盖×形态的派生色；气候 = 热量带×干湿）。
+     只重画地形那一层，不动地块/块区，省掉秒级的全量重画。 */
+  const want = u === "climate" ? "climate" : "terrain";
+  if (RO_VIEW !== want) { setRoView(want); repaintTerrain(); }
   searchText = "";
   syncUnitButtons();
   repaintPlotLayer();                       // 地块层着色口径随单元变（边界线不受影响，不必重建）
@@ -250,6 +251,7 @@ export function renderLeft() {
   if (leftKind === "domain") return renderDomainPanel();
   if (leftKind === "plot") return renderPlotPanel();
   if (leftKind === "block") return renderBlockPanel();
+  if (leftKind === "climate") return renderClimatePanel();
   return renderTerrainPanel();
 }
 export function refreshLeftCounts() {
@@ -270,7 +272,8 @@ function leftSubText() {
   if (leftKind === "domain") return `${DOM.length} 域 · 已指派 ${(domCells.reduce((a, b) => a + b, 0) / 1e6).toFixed(2)}M 格`;
   if (leftKind === "plot") return `${Object.keys(state.plots).length} 块 · ${(cellsWithPlot / 1e6).toFixed(2)}M 格`;
   if (leftKind === "block") return `${Object.keys(state.blocks).length} 个 · ${(cellsWithBlock / 1e6).toFixed(2)}M 格`;
-  return `${COVER_NAMES.length} 覆盖 × ${FORM_NAMES.length} 形态 · 只读`;
+  if (leftKind === "climate") return "热量带 × 干湿 · 只读";
+  return "显示类 · 只读";
 }
 function syncLeftSel() {
   const cur = state.sel[leftKind];
@@ -363,23 +366,86 @@ function renderBlockPanel() {
   afterPanelRender();
 }
 /* — 地形（只读；docs/adr/0001）— */
+/* 只读自然层的统计：一次遍历算两样——**显示类**计数（地形层）与**气候码**计数（气候层）。
+   显示类才是玩家在图上读到的名字（雨林/针叶林/沙漠/戈壁/苔原/田野/绿洲…），所以地形面板
+   按它统计；"覆盖 × 形态"的明细退到脚注。**不按覆盖数**——那答不了"雨林有多少"。 */
+let roStats = null, roStatsAt = 0;
+function roHistogram() {
+  const now = Date.now();
+  if (roStats && now - roStatsAt < 600) return roStats;
+  const byName = new Map(), byClimate = new Int32Array(32);
+  const byCover = new Int32Array(COVER_NAMES.length);
+  let land = 0;
+  const t = state.terr, k = climData;
+  for (let i = 0; i < NC; i++) {
+    const b = t[i], c = b >> 4, f = b & 15, code = (k[i] || 0) & 31;
+    // 海洋**两样都不算**：它的气候码恒为 0，混进来会让"寒带"凭空多出 6,400 万格（实测）。
+    if (c === 0) continue;
+    land++; byCover[c]++; byClimate[code]++;
+    const r = displayOf(c, f, code >> 3, code & 7);
+    const n = r ? r.n : `覆盖 ${c} · 形态 ${f}`;
+    byName.set(n, (byName.get(n) || 0) + 1);
+  }
+  roStats = { byName, byClimate, byCover, land };
+  roStatsAt = now;
+  return roStats;
+}
+
+function colorOfDisplayName(n) {
+  for (const r of DISPLAY_RULES) if (r.n === n) return r.c;
+  return "#cccccc";
+}
+
 function renderTerrainPanel() {
   leftTitle.textContent = "地形";
-  leftSub.textContent = "覆盖 × 形态 · 只读（管线定稿）";
-  const h = terrainHistogram(), hf = formHistogram();
-  leftBody.innerHTML = COVER_NAMES.map((n, i) =>
+  leftSub.textContent = "显示类 · 只读（覆盖 × 形态 × 气候）";
+  const { byName, land } = roHistogram();
+  const rows = [...byName.entries()].sort((a, b) => b[1] - a[1]);
+  leftBody.innerHTML = rows.map(([n, v]) =>
       `<div class="row lv0" style="cursor:default">`
-      + `<span class="sw" style="background:${coverColor(i)}"></span><span class="nm">${esc(n)}</span>`
-      + `<span class="n">${((h[i] || 0) / NC * 100).toFixed(2)}%</span></div>`).join("")
-    + `<div class="sec-h">形态（覆盖之下的一轴）</div>`
-    + FORM_NAMES.map((n, i) =>
-        `<div class="row lv0" style="cursor:default"><span class="nm">${esc(n)}</span>`
-        + `<span class="n">${((hf[i] || 0) / NC * 100).toFixed(2)}%</span></div>`).join("")
-    + `<div class="mut" style="padding:6px 9px;font-size:10.5px">地形字节 = 覆盖(高 4 位) × 16 +
-       形态(低 4 位)，由管线从 ETOPO 高程、起伏与 Copernicus 土地覆盖算出，编辑器只读。
-       图上的名字（雨林/针叶林/沙漠/戈壁/河谷农田…）是「覆盖 × 形态 × 气候」当场派生的显示类，
-       见 docs/adr/0006、0007。</div>`;
+      + `<span class="sw" style="background:${colorOfDisplayName(n)}"></span>`
+      + `<span class="nm">${esc(n)}</span>`
+      + `<span class="n">${(v / NC * 100).toFixed(2)}%</span></div>`).join("")
+    + `<div class="mut" style="padding:6px 9px;font-size:10.5px">陆地 ${(land / 1e6).toFixed(2)}M 格
+       （百分比以全图为分母）。名字是「覆盖 × 形态 × 气候」当场算出来的**显示类**；
+       底图里只存覆盖（高 4 位）与形态（低 4 位）——见 docs/adr/0006、0007。
+       发现错格只能改管线的分类规则并重跑，编辑器改不了它。</div>`;
 }
+
+function renderClimatePanel() {
+  leftTitle.textContent = "气候";
+  leftSub.textContent = "热量带 × 干湿 · 只读（柯本）";
+  const { byClimate, land } = roHistogram();
+  const H = CLIMATE.heat || [], M = CLIMATE.moist || [];
+  const cell = (h, m) => {
+    const code = h * 8 + m, v = byClimate[code] || 0, pct = v / NC * 100;
+    return `<span title="${esc(H[h] || "")}·${esc(M[m] || "")} ${v.toLocaleString()} 格"`
+      + ` style="background:${climateColor(code)};height:19px;border-radius:3px;text-align:center;`
+      + `line-height:19px;font-size:9.5px;color:#3a3a3a">${pct >= 0.04 ? pct.toFixed(1) + "%" : ""}</span>`;
+  };
+  let html = `<div class="mut" style="padding:6px 9px 2px;font-size:10.5px">陆地 ${(land / 1e6).toFixed(2)}M 格。
+     <b>寒带</b>不占热量带那一轴——它是干湿的「寒带」，单独一行。</div>`;
+  html += `<div style="display:grid;grid-template-columns:46px 1fr;gap:2px;padding:6px 9px 2px">`
+    + `<span class="mut" style="font-size:10px;line-height:19px">寒带</span>`
+    + `<span title="寒带 ${byClimate[0].toLocaleString()} 格" style="background:${climateColor(0)};`
+    + `height:19px;border-radius:3px;text-align:center;line-height:19px;font-size:9.5px;color:#3a3a3a">`
+    + `${byClimate[0] / NC * 100 >= 0.04 ? (byClimate[0] / NC * 100).toFixed(2) + "%" : ""}</span></div>`;
+  html += `<div style="display:grid;grid-template-columns:46px repeat(${M.length - 1},1fr);gap:2px;`
+    + `padding:2px 9px 8px">`;
+  html += `<span></span>` + M.slice(1).map(m =>
+    `<span class="mut" style="font-size:9.5px;text-align:center;writing-mode:vertical-rl;`
+    + `justify-self:center;height:34px">${esc(m)}</span>`).join("");
+  for (let h = 0; h < H.length; h++) {
+    html += `<span class="mut" style="font-size:10px;line-height:19px">${esc(H[h])}</span>`;
+    for (let m = 1; m < M.length; m++) html += cell(h, m);
+  }
+  html += `</div>`;
+  html += `<div class="mut" style="padding:0 9px 8px;font-size:10.5px">码 = 热量带 × 8 + 干湿。
+     热量带 4 档、干湿 7 档（+寒带）；**B 组按纬度补过一刀**（BWh/BSh 在回归线外算亚热带）。
+     见 docs/adr/0006。</div>`;
+  leftBody.innerHTML = html;
+}
+
 function afterPanelRender() {
   rowRefs = new Map();
   leftBody.querySelectorAll(".row").forEach(el => {
@@ -597,16 +663,6 @@ function terrainHistogram() {
   const t = state.terr;
   for (let i = 0; i < NC; i++) { const c = t[i] >> 4; if (c < h.length) h[c]++; }
   terrHist = h; terrHistAt = now;
-  return h;
-}
-let formHist = null, formHistAt = 0;
-function formHistogram() {
-  const now = Date.now();
-  if (formHist && now - formHistAt < 400) return formHist;
-  const h = new Int32Array(FORM_NAMES.length);
-  const t = state.terr;
-  for (let i = 0; i < NC; i++) { const f = t[i] & 15; if (f < h.length) h[f]++; }
-  formHist = h; formHistAt = now;
   return h;
 }
 function inspTerrain() {
