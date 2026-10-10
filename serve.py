@@ -30,6 +30,9 @@ for _s in (sys.stdout, sys.stderr):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))                 # game/
+# mapdata.py 跟着地形流程搬进了 地图/栅格地形数据生成器/，这里得把那一包挂上 sys.path。
+# 搬完漏了这个入口，表现是双击 启动编辑器.bat 直接报 ModuleNotFoundError: No module named 'mapdata'。
+sys.path.insert(0, os.path.join(ROOT, "地图", "栅格地形数据生成器"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 # 路径与白名单的唯一出处是 地图/栅格地形数据生成器/mapdata.py —— 抄一份在这里就是又造了一个会分叉的源头
 from mapdata import RASTER as DATA_DIR, STAGING as STAGING_DIR, STAGING_FILES, URL_PREFIX
