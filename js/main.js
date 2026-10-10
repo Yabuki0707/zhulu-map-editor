@@ -30,7 +30,7 @@ async function init() {
   const draft = await probeDraft();
   const useDraft = draft ? await askDraft(draft) : false;
   if (useDraft) {
-    /* 草稿里只有行政图的两层；地形与参考顶点**永远**读真源——
+    /* 草稿里只有行政图的两层；地形底图与参考顶点**永远**读真源——
        地形是管线定稿，草稿里本来就没有它。 */
     DATA.plot_png = "/草稿/地块编码.png";
     DATA.dist_png = "/草稿/分区编码.png";
@@ -71,8 +71,8 @@ async function init() {
      症状是"选中的地块跑到光标东边，且越往右偏得越多"。 */
   resize(); fit();
   /* 单元用存档里恢复的那个（applySnapshot 已写好 state.unit）。
-     地形是只读单元（docs/adr/0001）：存档若停在它上面，回编辑模式得先落到"地块"——
-     否则会出现"当前笔刷 = 地形"却无处落笔的悬空态。 */
+     自然层是只读单元（docs/adr/0001）：存档若停在它上面，回编辑模式得先落到"地块"——
+     否则会出现"当前笔刷 = 只读自然层"却无处落笔的悬空态。 */
   if (!isEditable(state.unit)) state.unit = "plot";
   setMode("edit", true); setUnit(state.unit); setRadius(state.radius); setPen(true);
   renderLeft(); renderInspector(); renderStats();

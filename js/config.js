@@ -1,7 +1,7 @@
 /* ==========================================================================
    config.js —— 常量、三个**可编辑**单元（地域/地块/块区）、调色、图例
-   数据入口：js/data.js（由 tools/build_raster.py 生成，勿手改）
-   只读自然层（地形/气候）不在这里：它们由 js/ro.js 的 `RO_LAYERS` 描述、并**注册**进来
+   数据入口：js/data.js（由 地图/栅格地形数据生成器/生成.py 生成，勿手改）
+   只读自然层（样式/覆盖/形态/气候）不在这里：它们由 js/ro.js 的 `RO_LAYERS` 描述、并注册进来
    （见下面的 registerUnits）——加一层只改 ro.js 那张表，本文件一行不用动。
    ========================================================================== */
 
@@ -20,21 +20,32 @@ export const LS_HELP = LS_PREFIX + "help.v3";
 
 /* 笔刷半径（格）：1 = 单格；上限 50（默认格 0.0625° × 50 ≈ 347 km） */
 export const R_MIN = 1, R_MAX = 50, R_DEF = 4;      // R_DEF = 启动默认半径（index.html 的初始 SVG 也标 4）
-/* ---- 地形字节（v3）：**一个字节 = 覆盖(高 4 位) × 16 + 形态(低 4 位)** ----
-   覆盖 12 类：0海洋 1湖泊 2河流 3冰川 4森林 5草原 6荒漠 7沼泽 8滩涂 9盐沼 10草甸 11绿洲
+/* ---- 地形字节（v9）：**一个字节 = 覆盖(高 5 位) × 8 + 形态(低 3 位)** ----
+   覆盖 20 类：0海洋 1**淡湖** 2河流 3冰川 ｜ 4密林 5疏林 6灌丛 7草原 8草甸
+              9沼泽 10苔原 ｜ 11盐沼 12滩涂 ｜ 13沙质裸地 14砾质裸地 ｜ 15绿洲
+              16海冰 17**咸湖** 18盐漠 19火山（v9 追加；1 与 17 是「淡湖/咸湖」）
    形态 4 类：0平原 1丘陵 2高原 3山地（海洋格写 0 当 don't-care）
-   打解包在 tools/terrain.py 的 pack()/unpack()；契约见 docs/adr/0007。 */
+   ⚠️ **0–3 钉死**：下面 TER_THIN 与「字节 0 = 海洋」都靠它们。
+   ⚠️ v9 起覆盖占**高 5 位**（`docs/adr/0014`）：解包是 `字节 >> 3` 与 `字节 & 7`。最大字节 251。
+   ⚠️ v7 把「裸地」按**材质**拆成 沙质裸地／砾质裸地（`docs/adr/0012`）——「沙漠」与「戈壁」
+      是材质的差别、不是气候的差别（塔克拉玛干与蒙古戈壁在柯本里同属 BWk），材质来自 GSDP30。
+   打解包在 地图/栅格地形数据生成器/terrain.py 的 pack()/unpack()；契约见 docs/adr/0007、0010、0012 与
+   docs/地形覆盖判定规格.md。 */
 export const T_OCEAN = 0;             // 覆盖 0 ∧ 形态 0 —— **海洋恰好是字节 0**，判海陆仍只看它
-/* ⚠️ 下面四个是**覆盖码**，不是字节。要比对必须先 `字节 >> 4`（见 raster.js 的地形金字塔用法）。
+/* ⚠️ 下面四个是**覆盖码**，不是字节。要比对必须先 `字节 >> 3`（见 raster.js 的地形金字塔用法）。
    细线类（河、湖、冰川）降采样时必须保住，否则缩到全图整条消失；顺序即优先级。 */
 export const C_OCEAN = 0, C_LAKE = 1, C_RIVER = 2, C_ICE = 3;
+/* 覆盖 16 = 海冰（v9）。它**不是陆地、也不占形态与气候那两位**——判据只看"1981–2010 的
+   30 个 3 月里 ≥50% 的年份盖住这一格"，与冷暖干湿无关（管线侧 display_class 对海冰也只有一个
+   恒名「海冰」，不看形态）。所以「形态」「气候」两个只读层都要把它当**不适用**（见 ro.js）。 */
+export const C_SEAICE = 16;
 export const T_LAKE = C_LAKE, T_RIVER = C_RIVER, T_ICE = C_ICE;
 export const TER_THIN = [C_RIVER, C_LAKE, C_ICE];
 
 
 /* --------------------------------------------------------------------------
    **单元**：编辑层能碰的只有三个（地域 / 地块 / 块区），全是行政图上的东西。
-   自然层（地形 / 气候）是**产品层**、管线定稿，编辑器只能看（docs/adr/0001、0006、0007），
+   自然层（样式 / 覆盖 / 形态 / 气候）是**产品层**、管线定稿，编辑器只能看（docs/adr/0001、0006、0007、0014），
    所以它们**不在这里**——由 js/ro.js 的 `RO_LAYERS` 描述，并在模块载入时经
    `registerUnits()` 注册进来。于是「加一层自然层」= 在 ro.js 那张表里加一个描述物件：
    按钮、左栏面板、右栏检视器、配色、统计口径全从它派生，本文件与 ui.js 一行不动。
@@ -77,27 +88,41 @@ export const EDIT_UNITS = UNITS.filter(u => !u.viewOnly);
 export const MODES = [{ k: "view", n: "视图" }, { k: "edit", n: "编辑" }];
 
 /* ---------------- 地形配色与图例（顺序即编码，由 js/data.js 给） ---------------- */
-export const COVER_NAMES = DATA.cover_legend;       // 覆盖 12 类
+export const COVER_NAMES = DATA.cover_legend;       // 覆盖 20 类（v9）
 export const FORM_NAMES = DATA.form_legend;         // 形态 4 类
-/* 12 个**覆盖**的基础色：只当"覆盖族"的锚（图例里那 12 条占比、以及没有气候层时的兜底）。
+/* 20 个**覆盖**的基础色：只当"覆盖族"的锚（图例里那 20 条占比、「覆盖」层整层的取色、
+   以及没有气候层时的兜底）。
    图上真正的颜色是**显示类**的颜色，由 data.js 的 display_classes 给，一处也不在这里重复。
-   改色只需改 tools/display_class.py 的 PAINT，这里跟着它走。 */
+   ⚠️ **顺序必须与 COVER_LEGEND 完全一致**（顺序即契约）。
+   ⚠️ 这张表是**手抄**的，不是生成链的一环 —— 将来若把它并进 editor_data.py 生成，就可以去掉。
+   （显示类那 88 个色是 `地图/栅格地形数据生成器/make_palette.py` 按语义锚点生成的，那张表有脚本、这张没有。） */
 export const TER_COLORS = [
-  "#7fa6c4", "#6ea8d8", "#5b8fc7", "#eef4f8",
-  "#5b8a52", "#b9c68a", "#cdbb96", "#8fa98a", "#b0ab94", "#a8ad92", "#e8e4a8", "#86c06a",
+  "#7fa6c4", "#6ea8d8", "#5b8fc7", "#eef4f8",      // 海洋 湖泊 河流 冰川
+  "#3b6b46", "#7aa86a", "#949a5e", "#b9c68a", "#e8e4a8", "#8fa98a", "#caccbf",
+  //  密林     疏林     灌丛     草原     草甸     沼泽     苔原
+  "#a8ad92", "#b0ab94", "#d5b272", "#b5b0a6", "#86c06a",   // 盐沼 滩涂 沙质裸地 砾质裸地 绿洲
+  "#dfeaf2", "#4f8fb0", "#cfcabb", "#5d4a44",               // 海冰 咸水湖 盐漠 火山（v9 追加）
 ];
 export const coverColor = c => TER_COLORS[c] || "#cccccc";
+/* 4 个**形态**色的取色 —— 只给「形态」那一层用（`ro.js` 的 `FORM_LAYER`）：一个字节的
+   **低 3 位**，平原/丘陵/高原/山地，一个颜色一类。与上面那 20 个覆盖色互不约束（两层各看各的）。
+   在 CIE Lab 里量过：四色两两**最小 ΔE = 21.5**（丘陵／高原），离海洋底色 39+、离海冰色 16.7；
+   色义是"越陡越暖越深"：平原浅绿 → 丘陵黄绿 → 高原土黄 → 山地褐。
+   ⚠️ 与 TER_COLORS 一样是手抄的：**顺序必须与 FORM_NAMES 完全一致**。 */
+export const FORM_COLORS = ["#e3e7cf", "#c3c46f", "#d9b784", "#9d7a56"];
+export const formColor = f => FORM_COLORS[f] || "#cccccc";
 /* --------------------------------------------------------------------------
    **显示类 = 覆盖 × 形态 × 气候 的组合 = 地形**（v4，2026-10-09 统一口径）。
 
-   `display_classes` 是 60 类以内的名字与颜色（`[{n, c}]`），`display_lut` 是**组合 → 类下标**
+   `display_classes` 是 88 类的名字与颜色（`[{n, c}]`），`display_lut` 是**组合 → 类下标**
    的查表：`((覆盖×4 + 形态) × 32) + 码`，码 = 热量带 × 8 + 干湿，**干湿为 0 时整条码归零**
-   （那 2 位是 don't-care）。1536 项覆盖全部组合，所以查表**永远命中**。
+   （那 2 位是 don't-care）。**2560 项**（20 覆盖 × 4 形态 × 32 码）覆盖全部组合，所以查表**永远命中**。
+   长度由覆盖类数推出（契约 v9 起是 2560）—— 与 Python 侧 display_class.N_COMBO 同源。
 
    为什么不再用"有序规则表"：规则表要**扫**（940 万格的统计循环里就是 940 万次 × 31 条），
    而且"被前面通配规则吃掉的具体规则"从代码上根本看不出来。名字现在是 Python 侧的
    **按轴词表**（全函数），这里只是它的成品查表 —— 名字与配色的唯一出处是
-   `tools/display_class.py`，本文件与 ro.js 都不许再拼一份。
+   `地图/栅格地形数据生成器/display_class.py`，本文件与 ro.js 都不许再拼一份。
    -------------------------------------------------------------------------- */
 export const DISPLAY_CLASSES = DATA.display_classes || [];
 export const DISPLAY_LUT = DATA.display_lut || [];
@@ -106,7 +131,7 @@ export const CLIMATE = DATA.climate_legend || { heat: [], moist: [], encoding: "
 /* 一格 → 类下标（-1 = 查不到，只可能因为 data.js 是旧版或被截断；`bucketLabel` 会显示成灰行）。
    ⚠️ 参数是**地形字节 + 气候码**，不是四个轴：调用点手上本来就是这两样（state.terr / climData）。 */
 export function displayIndexOf(byte, code) {
-  const c = (byte | 0) >> 4, f = (byte | 0) & 15, k = (code | 0) & 31;
+  const c = (byte | 0) >> 3, f = (byte | 0) & 7, k = (code | 0) & 31;
   return DISPLAY_LUT[((c << 2) | f) * 32 + ((k & 7) === 0 ? 0 : k)] ?? -1;
 }
 export function displayOf(byte, code) {
@@ -121,11 +146,11 @@ export const terColor = (byte, kl) => {
     const r = displayOf(byte, kl);
     if (r && r.c) return r.c;
   }
-  return coverColor((byte | 0) >> 4);
+  return coverColor((byte | 0) >> 3);
 };
 /* ---- 气候层着色：热量带定色相、干湿定浓淡（干=浅、湿=深）----
    寒带（干湿码 0）单独一色：它跟热量带无关，是"极地"这件事本身。
-   海洋格在气候视图里**仍然画海洋色**——海洋的气候码无意义（见 build_raster 的注释）。 */
+   海洋格在气候视图里**仍然画海洋色**——海洋的气候码无意义（见 生成.py 的注释）。 */
 const HEAT_HUE = [22, 62, 100, 196];                    // 热带 → 亚寒带
 const MOIST_S = [0, 26, 33, 42, 49, 55, 60, 66];
 const MOIST_L = [78, 76, 72, 67, 62, 57, 53, 48];
@@ -134,7 +159,7 @@ export const climateColor = code => {
   if (m === 0) return "#c9d5dd";                        // 寒带（也吸收"无气候数据"）
   return `hsl(${HEAT_HUE[h] ?? 100} ${MOIST_S[m]}% ${MOIST_L[m]}%)`;
 };
-/* 只读自然层的**当前预览层**（"terrain" | "climate" | …）与它的一格取色 `roColor(字节, 气候码)`
+/* 只读自然层的**当前预览层**（"terrain"（样式）| "cover" | "form" | "climate"）与一格的取色 `roColor(字节, 气候码)`
    都搬到了 js/ro.js —— 那里的 `RO_LAYERS` 才是"一层自然层是什么"的唯一出处。
    本文件只提供纯色函数（coverColor / terColor / climateColor），不含任何具体自然层的知识。
    （原先这里还有个 `terName(字节)` 把"覆盖·形态"拼成一个词给界面用；两处界面现在都走

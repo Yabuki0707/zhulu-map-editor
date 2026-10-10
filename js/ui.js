@@ -3,7 +3,7 @@
    视图层与编辑层共用同一组对象：左栏列出"当前单元"的对象，点选即选中；
    编辑模式下选中的对象就是笔刷对象。
 
-   **只读自然层（地形 / 气候）的知识不在这里**：它们由 js/ro.js 的 `RO_LAYERS` 描述，
+   **只读自然层（样式 / 覆盖 / 形态 / 气候）的知识不在这里**：它们由 js/ro.js 的 `RO_LAYERS` 描述，
    本文件只留三条通用路径 —— 顶栏按钮由表生成、左栏面板调 `layer.panel(stats)`、
    右栏检视器调 `layer.insp(stats)`。所以"加一层自然层"不用碰这个文件（2026-10-09 抽的）。
    ========================================================================== */
@@ -36,7 +36,7 @@ export function toast(msg, ms) {
 
 /* ---------------- 模式（视图 / 编辑） ---------------- */
 /* 自然层是**只读**单元（docs/adr/0001）：编辑模式里没有它们。
-   两个口径都要收紧，缺一个就会留下"当前笔刷 = 地形"却无处落笔的悬空态：
+   两个口径都要收紧，缺一个就会留下"当前笔刷 = 只读自然层"却无处落笔的悬空态：
      ① `coerceUnit` 把**当前单元**推到合法值；
      ② `syncRoButtons` 把**按钮**连分隔符一起藏起来（不是只藏地形那一个——
         气候原来漏了，于是编辑模式下还能点进一个只读层）。 */
@@ -85,7 +85,7 @@ export function setUnit(u) {
   state.unit = u;
   /* 底图着色切到当前层。⚠️ **离开只读层时要切回地形**：`want` 不能只在只读层上算——
      否则看过一次「气候」之后切回地块/块区，底图会一直留着气候配色（地块层是半透明的），
-     而唯一能把它切回来的动作是再点一次「地形」。所以非只读单元一律 want = "terrain"。 */
+     而唯一能把它切回来的动作是再点一次「样式」。所以非只读单元一律 want = "terrain"。 */
   const want = isRoUnit(u) ? u : "terrain";
   if (RO_VIEW !== want) { setRoView(want); repaintTerrain(); }
   searchText = "";
@@ -144,7 +144,7 @@ export const plotNameOf = id => (id && state.plots[id] ? state.plots[id].n : `�
 export function newAtCurrent() {
   const u = state.unit;
   if (u === "domain") return toast("地域不可新建：地域是设计层固定的 93 个，用「地域」单元把地块指派进去", 2800);
-  /* ⚠️ 这一条必须**拦住所有只读层**，不能只写 terrain：漏了 climate 的话，在气候视图里
+  /* ⚠️ 这一条必须**拦住所有只读层**，不能只写 terrain：漏掉任何一层的话，在那一层的视图里
      点「＋ 新建」会一路落到 `createBlockAt`，凭空建出一个块区（改的是行政层！）。 */
   if (isRoUnit(u)) {
     const L = roLayer(u);
@@ -222,7 +222,7 @@ function addCellTo(k, kind, id) {
      地域 → 选中该格所属的【地块】（地域的编辑对象本来就是地块）
      地块 → 选中该【栅格】，并把该格所属地块设为当前地块
      块区 → 选中该【栅格】，同时带上该格的地块与块区
-     自然层（地形/气候）→ 不可选中（只读底图，没有"选中某个地形"这回事）
+     自然层（样式/覆盖/形态/气候）→ 不可选中（只读底图，没有"选中某个地形"这回事）
    选中的那一格记进 state.selCell，新建对象时以它为落点。
    quiet = 右键按住连续拾取时用：只做轻量更新（高亮 + 清单高亮），
    右栏检视器与统计留到松手那一下再整体重建——否则每换一格就要为全部地块生成一遍下拉选项。
@@ -274,7 +274,7 @@ export function renderLeft() {
   if (leftKind === "domain") return renderDomainPanel();
   if (leftKind === "plot") return renderPlotPanel();
   if (leftKind === "block") return renderBlockPanel();
-  return renderRoPanel(leftKind);                 // 只读自然层（地形 / 气候 / …）
+  return renderRoPanel(leftKind);                 // 只读自然层（样式 / 覆盖 / 形态 / 气候）
 }
 export function refreshLeftCounts() {
   const free = cellsWithPlot - domCells.reduce((a, b) => a + b, 0);
@@ -386,7 +386,7 @@ function renderBlockPanel() {
       : `<div class="empty">还没有块区。点右上「＋ 新建」，再在地图上涂。</div>`);
   afterPanelRender();
 }
-/* — 只读自然层（地形 / 气候 / …；docs/adr/0001）—
+/* — 只读自然层（样式 / 覆盖 / 形态 / 气候；docs/adr/0001）—
    本文件对只读层**只知道三件事**：调 `layer.panel(stats)` 出左栏、调 `layer.insp(stats)`
    出右栏、用 `layer.n / .sub` 出抬头。层自己的名字、配色、统计口径、脚注全在 ro.js 那张表。
    面板与检视器共用**同一份统计**：一次遍历（940 万格）喂所有层，缓存 600 ms——
@@ -984,15 +984,17 @@ function bindHelp() {
     box.innerHTML = `<button class="x" title="关闭">✕</button>
       <b>两种模式</b><span class="sec"><kbd>V</kbd> 视图（拖拽平移 · 滚轮缩放 · 点选看明细）<br>
       <kbd>E</kbd> 编辑（左键涂抹 · <b>右键选中</b> · <kbd>空格</kbd>/中键平移）</span>
-      <span class="sec"><b>右键选中什么</b>由单元决定：<b>地域</b>→选中光标下的<b>地块</b>；<b>地块/块区</b>→选中那一<b>栅格</b>；<b>自然层</b>（地形/气候）→不可选中（只读，没有"选中某个地形"这回事）</span>
+      <span class="sec"><b>右键选中什么</b>由单元决定：<b>地域</b>→选中光标下的<b>地块</b>；<b>地块/块区</b>→选中那一<b>栅格</b>；<b>自然层</b>（样式/覆盖/形态/气候）→不可选中（只读，没有"选中某个地形"这回事）</span>
       <span class="sec"><b>三个可编辑单元</b>（行政图；视图层／编辑层共用）<br>
       <kbd>1</kbd> 地域 → 编辑对象是<b>地块</b>（拖过一片即改其归属）<br>
       <kbd>2</kbd> 地块 → 编辑对象是<b>栅格</b>（写入地块编码）<br>
       <kbd>3</kbd> 块区 → 编辑对象是<b>所属地块内的栅格</b></span>
-      <span class="sec"><b>两个只读自然层</b>（<b>只在视图模式</b>出现；编辑模式下单元条上根本没有它们）<br>
-      <kbd>4</kbd> 地形 → 一个字节 = <b>覆盖</b>（高 4 位）× 16 + <b>形态</b>（低 4 位）；左栏按<b>显示类</b>统计<br>
-      <kbd>5</kbd> 气候 → 一个字节 = <b>热量带</b> × 8 + <b>干湿</b>；左栏是两轴交叉表<br>
-      两者都由管线定稿、编辑器一格都不许改（<code>docs/adr/0001</code>）；
+      <span class="sec"><b>四个只读自然层</b>（<b>只在视图模式</b>出现；编辑模式下单元条上根本没有它们）<br>
+      <kbd>4</kbd> <b>样式</b> → <b>覆盖 × 形态 × 气候</b> 合成出来的<b>显示类</b>（88 类，一格一名一色）<br>
+      <kbd>5</kbd> <b>覆盖</b> → 一个字节的<b>高 5 位</b>（20 类：海洋/淡湖/密林/草原/沙质裸地…）<br>
+      <kbd>6</kbd> <b>形态</b> → 一个字节的<b>低 3 位</b>（4 类：平原/丘陵/高原/山地，只看平陡）<br>
+      <kbd>7</kbd> <b>气候</b> → 另一张图：<b>热量带 × 干湿</b>（柯本两轴）；左栏是两轴交叉表<br>
+      四者都由管线定稿、编辑器一格都不许改（<code>docs/adr/0001</code>）；
       底图着色随当前层切换，页脚读数一次报全：覆盖 ｜ 形态 ｜ 热量带 ｜ 干湿 ｜ <b>显示类</b></span>
       <span class="sec"><b>笔与橡皮</b><kbd>B</kbd> 笔 · <kbd>X</kbd> 橡皮 · 半径 <kbd>[</kbd> <kbd>]</kbd> 或拖顶栏滑杆（1–50 格）<br><b>右键</b> = 选中（拾取）光标下的对象；按住右键拖动可连续拾取</span>
       <span class="sec"><b>图层</b><kbd>T</kbd> 地形底图 · <kbd>R</kbd> 参考层（**矢量顶点**：唐 741 州面 ＋ 现代单元边界；放大到 12 倍显示顶点） · <kbd>P</kbd> 地块线 · <kbd>K</kbd> 块区线</span>
@@ -1216,7 +1218,7 @@ function bindInput() {
 }
 /* , / . —— 前后切换：
    行政单元在**自己的清单**里走一个对象；只读自然层没有"对象"，就切**层**
-   （地形 ⇄ 气候），这也让"顶栏可切自然层"多一条键盘路径。 */
+   （样式 ⇄ 覆盖 ⇄ 形态 ⇄ 气候），这也让"顶栏可切自然层"多一条键盘路径。 */
 function stepObject(d) {
   const u = state.unit;
   if (isRoUnit(u)) {

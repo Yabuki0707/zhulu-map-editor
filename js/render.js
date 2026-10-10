@@ -82,7 +82,7 @@ function blit(cvs, sw, sh, step) {
 /* 地形层：缩小时取金字塔的一级，而不是满分辨率一次 blit。
    地形底图是 `imageSmoothingEnabled=false`（最近邻点采样），满分辨率直接缩会把
    1 格宽的河整片丢掉 —— 那是「长江断流」在屏幕上的那一半原因（另一半在数据侧，
-   见 tools/build_raster.py 的 burn_lines）。取"每格 1~2 屏像素"那一级就不丢。 */
+   见 地图/栅格地形数据生成器/生成.py 的 burn_lines）。取"每格 1~2 屏像素"那一级就不丢。 */
 function blitTerrain() {
   const v = state.view;
   const mips = terrainMips();

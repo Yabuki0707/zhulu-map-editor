@@ -153,7 +153,7 @@ export function buildMips(src, w, h, maxLevel, orLevels = 1) {
 
    为什么必须做：地形底图原本是满分辨率一次 blit，而 canvas 是
    `imageSmoothingEnabled=false`（最近邻点采样）。缩小时 1 格宽的河会被整片丢掉，
-   屏幕上就是「长江断流」。数据侧已把河烧成 4 邻接连通（tools/build_raster.py 的
+   屏幕上就是「长江断流」。数据侧已把河烧成 4 邻接连通（地图/栅格地形数据生成器/生成.py 的
    burn_lines），但点采样照样会丢——两边都得治。
 
    地形**永远不变**（管线定稿、编辑器只读，docs/adr/0001），所以建一次就够，
@@ -167,7 +167,7 @@ export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
     const nw = Math.max(1, cw >> 1), nh = Math.max(1, ch >> 1), nd = new Uint8Array(nw * nh);
     const ndc = new Uint8Array(nw * nh);         // 同级的**气候码**降采样，供派生显示色
     const need = l <= thinLevels ? 1 : 2;
-    const cnt = new Uint8Array(256);            // 地形字节 0..196，按**字节**数
+    const cnt = new Uint8Array(256);            // 地形字节 = 覆盖(高4位)×16+形态(低4位)。v9 起最大 31×8+3 = 251，256 够
 
     const cntC = new Uint8Array(32);
     for (let y = 0; y < nh; y++) {
@@ -178,7 +178,7 @@ export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
         let thin = -1, nThin = 0;
         // ⚠️ TER_THIN 是**覆盖码**（v3），比的是字节的高 4 位；直接 `a === t` 会比不中，
         // 缩小时 1 格宽的河就整片消失（那正是当初做金字塔要解决的问题）。
-        const cv = v => v >> 4;
+        const cv = v => v >> 3;
         for (const t of TER_THIN) {                // TER_THIN 已按优先级排好
           if (cv(a) === t || cv(b) === t || cv(c) === t || cv(d) === t) {
             if (thin < 0) thin = t; nThin++;
@@ -211,7 +211,7 @@ export function buildTerrainMips(maxLevel = 3, thinLevels = 2) {
   return levels;
 }
 /* 金字塔某级 → 上色画布。**按"级 × 只读预览层"缓存**（自然层不变，缓存不必失效，
-   只有切换 地形/气候 时才换一份——层与取色口径都在 js/ro.js 的 RO_LAYERS）。
+   只有切换自然层时才换一份——层与取色口径都在 js/ro.js 的 RO_LAYERS）。
    ⚠️ 千万别在这里按层名分叉取色：那正是 2026-10-09 抽掉的那坨"按单元硬编码"。 */
 const terMipCanvases = new WeakMap();          // level → { [层名]: canvas }
 export function terMipCanvas(level) {

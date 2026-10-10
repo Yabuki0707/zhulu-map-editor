@@ -25,7 +25,7 @@ export const REF = {
   bytes: 0,
 };
 
-const SUB = 8;                                        // 与 tools/refvec.py 的 SUB 一致
+const SUB = 8;                                        // 与 地图/栅格地形数据生成器/refvec.py 的 SUB 一致
 
 function parse(buf) {
   const dv = new DataView(buf);

@@ -12,7 +12,7 @@
     POST /保存          → body 为 JSON {"base_tag":…, "files":{文件名: dataURL | 对象}}，
                           一律落进 待合入/，**只允许白名单里的三个文件**
 
-白名单在 `tools/mapdata.py` 的 `STAGING_FILES`。地形编码.png 与 参考顶点.bin 不在里面——
+白名单在 `地图/栅格地形数据生成器/mapdata.py` 的 `STAGING_FILES`。地形编码.png 与 参考顶点.bin 不在里面——
 地形图是管线从 ETOPO + LC100 算出来的、将来要做规则层的"基础地形代价"来源，
 让人一笔划过改掉模拟底数是不能接受的（见 `docs/adr/0001`）。
 
@@ -31,7 +31,7 @@ for _s in (sys.stdout, sys.stderr):
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))                 # game/
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-# 路径与白名单的唯一出处是 tools/mapdata.py —— 抄一份在这里就是又造了一个会分叉的源头
+# 路径与白名单的唯一出处是 地图/栅格地形数据生成器/mapdata.py —— 抄一份在这里就是又造了一个会分叉的源头
 from mapdata import RASTER as DATA_DIR, STAGING as STAGING_DIR, STAGING_FILES, URL_PREFIX
 
 SAVE_PREFIX = "/保存"
